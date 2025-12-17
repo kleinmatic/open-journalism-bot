@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-News Nerd Repos - Monitor GitHub accounts and post new repos to BlueSky.
+Open Journalism Bot - Monitor GitHub accounts and post new repos to BlueSky.
 """
 
 import argparse
 import csv
 import io
+import logging
 import os
 import sys
 from datetime import datetime, timezone, timedelta
@@ -141,7 +142,7 @@ def fetch_recent_repos(github_url, token=None, minutes=15):
             continue
 
     if repos_data is None:
-        print(f"Warning: Could not fetch repos for {username}", file=sys.stderr)
+        logging.warning(f"Could not fetch repos for {username}")
         return []
 
     # Filter to repos created within the time window
@@ -234,12 +235,18 @@ def parse_args():
 
 def main():
     """Main entry point."""
+    logging.basicConfig(
+        format='%(asctime)s %(levelname)s: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        level=logging.INFO,
+    )
+
     args = parse_args()
 
     try:
         config = load_config()
     except ValueError as e:
-        print(f"Configuration error: {e}", file=sys.stderr)
+        logging.error(f"Configuration error: {e}")
         sys.exit(1)
 
     # Allow command line override of minutes
@@ -247,11 +254,11 @@ def main():
         config['check_minutes'] = args.minutes
 
     # Fetch CSV (needed for both normal mode and --org lookup)
-    print(f"Fetching CSV from {config['csv_url']}...")
+    logging.info(f"Fetching CSV from {config['csv_url']}...")
     try:
         csv_content = fetch_csv(config['csv_url'])
     except requests.exceptions.RequestException as e:
-        print(f"Failed to fetch CSV: {e}", file=sys.stderr)
+        logging.error(f"Failed to fetch CSV: {e}")
         sys.exit(1)
 
     all_orgs = parse_csv(csv_content)
@@ -268,32 +275,32 @@ def main():
 
         if matching:
             orgs = matching
-            print(f"Testing single org: {orgs[0]['org_name']}")
+            logging.info(f"Testing single org: {orgs[0]['org_name']}")
         else:
             # Not in CSV, use handle as fallback
             github_url = f'https://github.com/{handle}'
             display_name = args.name if args.name else handle
             orgs = [{'org_name': display_name, 'github_url': github_url}]
-            print(f"Org '{handle}' not found in CSV, using handle as name")
+            logging.info(f"Org '{handle}' not found in CSV, using handle as name")
     else:
         orgs = all_orgs
 
         # Apply limit if specified
         if args.limit > 0:
             orgs = orgs[:args.limit]
-            print(f"Limited to first {args.limit} organizations")
+            logging.info(f"Limited to first {args.limit} organizations")
 
-    print(f"Checking {len(orgs)} organizations for repos created in last {config['check_minutes']} minutes...")
+    logging.info(f"Checking {len(orgs)} organizations for repos created in last {config['check_minutes']} minutes...")
 
     if not config['github_token']:
-        print("Note: No GITHUB_TOKEN set. Rate limited to 60 requests/hour.", file=sys.stderr)
+        logging.warning("No GITHUB_TOKEN set. Rate limited to 60 requests/hour.")
 
     template = load_template()
 
     # Initialize BlueSky client if not in test mode
     bluesky_client = None
     if not config['test_mode']:
-        print("Logging into BlueSky...")
+        logging.info("Logging into BlueSky...")
         bluesky_client = Client()
         bluesky_client.login(config['bluesky_handle'], config['bluesky_password'])
 
@@ -309,30 +316,29 @@ def main():
             )
             orgs_checked += 1
         except RateLimitError as e:
-            print(f"\nError: GitHub API rate limit exceeded!", file=sys.stderr)
-            print(f"Checked {orgs_checked} of {len(orgs)} organizations before hitting limit.", file=sys.stderr)
-            print(f"Rate limit resets at: {e.reset_time.strftime('%Y-%m-%d %H:%M:%S UTC')}", file=sys.stderr)
-            print("Tip: Set GITHUB_TOKEN in .env for 5000 requests/hour.", file=sys.stderr)
+            logging.error("GitHub API rate limit exceeded!")
+            logging.error(f"Checked {orgs_checked} of {len(orgs)} organizations before hitting limit.")
+            logging.error(f"Rate limit resets at: {e.reset_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            logging.error("Tip: Set GITHUB_TOKEN in .env for 5000 requests/hour.")
             sys.exit(1)
 
         for repo in repos:
             post_text = render_post(template, org['org_name'], repo)
 
             if config['test_mode']:
-                print("\n--- TEST MODE: Would post ---")
-                print(post_text)
-                print(f"\n[Link Card]")
-                print(f"  Title: {repo['repo_name']}")
-                print(f"  Description: {repo['description'] or 'A GitHub repository'}")
-                print(f"  URL: {repo['repo_url']}")
-                print("----------------------------")
+                logging.info("--- TEST MODE: Would post ---")
+                logging.info(post_text)
+                logging.info(f"[Link Card] Title: {repo['repo_name']}")
+                logging.info(f"[Link Card] Description: {repo['description'] or 'A GitHub repository'}")
+                logging.info(f"[Link Card] URL: {repo['repo_url']}")
+                logging.info("----------------------------")
             else:
-                print(f"Posting about {org['org_name']}/{repo['repo_name']}...")
+                logging.info(f"Posting about {org['org_name']}/{repo['repo_name']}...")
                 post_to_bluesky(bluesky_client, post_text, repo)
 
             total_new_repos += 1
 
-    print(f"\nDone. Checked {orgs_checked} organizations, found {total_new_repos} new repos.")
+    logging.info(f"Done. Checked {orgs_checked} organizations, found {total_new_repos} new repos.")
 
 
 if __name__ == '__main__':
