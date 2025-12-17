@@ -1,0 +1,14 @@
+[project]
+name = "open-journalism-bot"
+version = "0.1.0"
+description = "Monitor GitHub accounts from journalism orgs and post new repos to BlueSky"
+requires-python = ">=3.13"
+dependencies = [
+    "atproto>=0.0.65",
+    "chevron>=0.14.0",
+    "python-dotenv>=1.2.1",
+    "requests>=2.32.5",
+]
+
+[project.scripts]
+open-journalism-bot = "open_journalism_bot:main"
