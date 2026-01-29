@@ -61,11 +61,13 @@ TEST_MODE=true
 
 ```bash
 # Test mode (prints to stdout, doesn't post)
-uv run open_journalism_bot.py --limit 10
+uv run open_journalism_bot.py --limit 10 --dry-run
 
 # Test a specific org
-uv run open_journalism_bot.py --org striblab --minutes 1440
+uv run open_journalism_bot.py --org striblab --minutes 1440 --dry-run
 ```
+
+**Important:** Always use `--dry-run` when testing if `TEST_MODE=false` in your `.env`, otherwise posts will go live.
 
 ### 5. Run for real
 
@@ -82,22 +84,23 @@ uv run open_journalism_bot.py
 --minutes N, -m N   Override CHECK_MINUTES from .env
 --org HANDLE, -o    Test a single org by GitHub handle (e.g., "nytimes")
 --name NAME, -n     Display name when using --org for orgs not in CSV
+--dry-run           Force test mode (no posting) regardless of TEST_MODE in .env
 ```
 
 Examples:
 
 ```bash
-# Check all orgs, last 59 minutes
+# Check all orgs, last 59 minutes (production)
 uv run open_journalism_bot.py
 
-# Check first 20 orgs only
-uv run open_journalism_bot.py --limit 20
+# Check first 20 orgs only (dry run)
+uv run open_journalism_bot.py --limit 20 --dry-run
 
-# Check specific org, last 24 hours
-uv run open_journalism_bot.py --org propublica --minutes 1440
+# Check specific org, last 24 hours (dry run)
+uv run open_journalism_bot.py --org propublica --minutes 1440 --dry-run
 
-# Check org not in CSV
-uv run open_journalism_bot.py --org someorg --name "Some Organization" --minutes 60
+# Check org not in CSV (dry run)
+uv run open_journalism_bot.py --org someorg --name "Some Organization" --minutes 60 --dry-run
 ```
 
 ## Cron Setup

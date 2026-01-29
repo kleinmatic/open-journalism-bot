@@ -150,6 +150,10 @@ def fetch_recent_repos(github_url, token=None, minutes=15):
     new_repos = []
 
     for repo in repos_data:
+        # Skip forks - we only want original repos
+        if repo.get('fork', False):
+            continue
+
         created_at = datetime.fromisoformat(repo['created_at'].replace('Z', '+00:00'))
 
         if created_at >= cutoff_time:
@@ -230,6 +234,11 @@ def parse_args():
         default=None,
         help='Display name for the org when using --org (e.g., "Star Tribune")'
     )
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Force test mode (no posting) regardless of TEST_MODE in .env'
+    )
     return parser.parse_args()
 
 
@@ -249,9 +258,11 @@ def main():
         logging.error(f"Configuration error: {e}")
         sys.exit(1)
 
-    # Allow command line override of minutes
+    # Allow command line overrides
     if args.minutes is not None:
         config['check_minutes'] = args.minutes
+    if args.dry_run:
+        config['test_mode'] = True
 
     # Fetch CSV (needed for both normal mode and --org lookup)
     logging.info(f"Fetching CSV from {config['csv_url']}...")

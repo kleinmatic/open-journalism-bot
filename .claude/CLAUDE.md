@@ -10,15 +10,18 @@ BlueSky bot that posts when journalism organizations create new public GitHub re
 # Install dependencies
 uv sync
 
-# Test mode (prints to stdout)
-uv run open_journalism_bot.py --limit 10
+# Test mode (prints to stdout instead of posting)
+# Use --dry-run to force test mode regardless of TEST_MODE in .env
+uv run open_journalism_bot.py --limit 10 --dry-run
 
-# Test single org
-uv run open_journalism_bot.py --org striblab --minutes 1440
+# Test single org (--dry-run prevents actual posting)
+uv run open_journalism_bot.py --org striblab --minutes 1440 --dry-run
 
-# Run for real (set TEST_MODE=false in .env first)
+# Run for real (requires TEST_MODE=false in .env)
 uv run open_journalism_bot.py
 ```
+
+**Note:** If `TEST_MODE=false` in `.env`, the bot will post to BlueSky. Always use `--dry-run` when testing to avoid accidental posts.
 
 ## Security
 
