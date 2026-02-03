@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Monitor GitHub accounts from journalism orgs and post new repos to BlueSky"
 requires-python = ">=3.13"
 dependencies = [
+    "anthropic>=0.42.0",
     "atproto>=0.0.65",
     "chevron>=0.14.0",
     "python-dotenv>=1.2.1",
