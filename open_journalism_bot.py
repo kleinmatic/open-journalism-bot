@@ -272,9 +272,11 @@ def get_repo_description(repo, token=None, anthropic_api_key=None):
     2. Summarize README with Claude if available
     3. Fall back to language-based description
     """
-    # Tier 1: Use API description if present
+    # Tier 1: Use API description if present (sanitized)
     if repo.get('description'):
-        return repo['description']
+        sanitized = sanitize_summary(repo['description'])
+        if sanitized:
+            return sanitized
 
     # Tier 2: Try README summarization
     if anthropic_api_key:

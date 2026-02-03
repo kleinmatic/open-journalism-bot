@@ -28,6 +28,7 @@ uv run open_journalism_bot.py
 - NEVER commit `.env` (contains API credentials)
 - `.env.example` has safe placeholder values
 - GitHub token only needs "Public Repositories (read-only)" access
+- Anthropic API key is optional but enables AI-generated descriptions
 
 ## Architecture
 
@@ -35,9 +36,11 @@ uv run open_journalism_bot.py
 - `templates/post.mustache` - BlueSky post template (Mustache format)
 - Uses time-based detection: checks repos created within CHECK_MINUTES window
 - Link cards are embedded using `atproto` models
+- Description fallback: GitHub description → Claude README summary → language-based fallback
 
 ## Key Dependencies
 
+- `anthropic` - Claude API for README summarization
 - `atproto` - BlueSky API client
 - `chevron` - Mustache templating
 - `requests` - HTTP requests (GitHub API, CSV fetch)
