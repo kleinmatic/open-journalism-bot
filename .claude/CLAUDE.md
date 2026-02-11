@@ -34,9 +34,24 @@ uv run open_journalism_bot.py
 
 - `open_journalism_bot.py` - main script, all logic in one file
 - `templates/post.mustache` - BlueSky post template (Mustache format)
+- `logs/bot.log` - rotating log file (5MB, 3 backups)
 - Uses time-based detection: checks repos created within CHECK_MINUTES window
 - Link cards are embedded using `atproto` models
-- Description fallback: GitHub description → Claude README summary → language-based fallback
+- Description tiers: GitHub description (in card) → Claude README summary → language fallback → "empty repo" (imputed descriptions go in post body, not card)
+
+## Debugging
+
+```bash
+# Debug with verbose logging and large time window to find historical repos
+uv run open_journalism_bot.py --org <org> --minutes 10000000 --dry-run --verbose
+
+# Check logs
+tail -f logs/bot.log
+```
+
+## Environment Notes
+
+- No `jq` installed - use Python for JSON parsing: `curl ... | python3 -c "import sys,json; ..."`
 
 ## Key Dependencies
 

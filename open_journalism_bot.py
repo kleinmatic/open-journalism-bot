@@ -8,6 +8,7 @@ import base64
 import csv
 import io
 import logging
+import logging.handlers
 import os
 import sys
 from datetime import datetime, timezone, timedelta
@@ -265,31 +266,62 @@ def sanitize_summary(text):
     return text
 
 
-def get_repo_description(repo, token=None, anthropic_api_key=None):
+def get_repo_descriptions(repo, token=None, anthropic_api_key=None):
     """
-    Get a description for a repo using tiered approach:
-    1. Use GitHub description if present
-    2. Summarize README with Claude if available
-    3. Fall back to language-based description
+    Get descriptions for a repo.
+
+    Returns a dict with:
+    - github_description: The actual GitHub description (for link cards), or empty string
+    - imputed_description: Our AI-generated/fallback description (for post body), or None
+                          if we're using GitHub's description
+
+    Logic:
+    - If GitHub has a description, use it in the card; no imputed description needed
+    - If no GitHub description, try Claude summarization of README
+    - If no README or Claude fails, fall back to language-based description
+    - If completely empty repo, say so
     """
-    # Tier 1: Use API description if present (sanitized)
+    repo_name = repo.get('full_name', repo.get('repo_name', 'unknown'))
+    github_desc = ''
+    imputed_desc = None
+
+    # Check for GitHub description (sanitized)
     if repo.get('description'):
         sanitized = sanitize_summary(repo['description'])
         if sanitized:
-            return sanitized
+            logging.info(f"{repo_name}: Using GitHub description")
+            return {'github_description': sanitized, 'imputed_description': None}
+        else:
+            logging.info(f"{repo_name}: GitHub description was sanitized away")
 
+    # No GitHub description - try to impute one
     # Tier 2: Try README summarization
     if anthropic_api_key:
         readme_content = fetch_readme(repo['full_name'], token)
         if readme_content:
+            logging.info(f"{repo_name}: Found README ({len(readme_content)} chars), asking Claude...")
             summary = summarize_with_claude(readme_content, anthropic_api_key)
             if summary:
-                return f"I think this is {summary}"
+                logging.info(f"{repo_name}: Claude summary: {summary}")
+                return {'github_description': '', 'imputed_description': f"I think this is {summary}"}
+            else:
+                logging.info(f"{repo_name}: Claude returned no summary (BOILERPLATE/INAPPROPRIATE or error)")
+        else:
+            logging.info(f"{repo_name}: No README found")
+    else:
+        logging.info(f"{repo_name}: No Anthropic API key, skipping README summarization")
 
     # Tier 3: Language fallback
     if repo.get('language'):
-        return f"I don't know what this does but it uses {repo['language']}"
-    return "A new repository"
+        logging.info(f"{repo_name}: Using language fallback ({repo['language']})")
+        return {
+            'github_description': '',
+            'imputed_description': f"I don't know what this does but it uses {repo['language']}.",
+        }
+
+    # Completely empty repo
+    logging.info(f"{repo_name}: No description, no README, no language - empty repo")
+    return {'github_description': '', 'imputed_description': "I think this is an empty repo."}
 
 
 def load_template():
@@ -299,31 +331,35 @@ def load_template():
         return f.read()
 
 
-def render_post(template, org_name, repo):
+def render_post(template, org_name, repo, imputed_description=None):
     """Render a BlueSky post using the template."""
     data = {
         'org_name': org_name,
         'repo_name': repo['repo_name'],
-        'description': repo['description'],
         'repo_url': repo['repo_url'],
         'language': repo['language'],
+        'imputed_description': imputed_description,
     }
     return chevron.render(template, data).strip()
 
 
-def create_link_card(repo):
-    """Create a BlueSky link card embed for a repo."""
+def create_link_card(repo, github_description=''):
+    """Create a BlueSky link card embed for a repo.
+
+    The description should only contain GitHub's actual description,
+    not our imputed/AI-generated descriptions.
+    """
     external = models.AppBskyEmbedExternal.External(
         uri=repo['repo_url'],
         title=repo['repo_name'],
-        description=repo['description'],
+        description=github_description,
     )
     return models.AppBskyEmbedExternal.Main(external=external)
 
 
-def post_to_bluesky(client, text, repo):
+def post_to_bluesky(client, text, repo, github_description=''):
     """Post text to BlueSky with a link card."""
-    embed = create_link_card(repo)
+    embed = create_link_card(repo, github_description)
     client.send_post(text=text, embed=embed)
 
 
@@ -361,18 +397,46 @@ def parse_args():
         action='store_true',
         help='Force test mode (no posting) regardless of TEST_MODE in .env'
     )
+    parser.add_argument(
+        '--verbose', '-v',
+        action='store_true',
+        help='Enable verbose/debug logging'
+    )
     return parser.parse_args()
+
+
+def setup_logging(verbose=False):
+    """Configure logging to both console and file."""
+    log_format = '%(asctime)s %(levelname)s: %(message)s'
+    date_format = '%Y-%m-%d %H:%M:%S'
+    level = logging.DEBUG if verbose else logging.INFO
+
+    # Create logs directory if needed
+    log_dir = Path(__file__).parent / 'logs'
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / 'bot.log'
+
+    # Configure root logger
+    logging.basicConfig(
+        format=log_format,
+        datefmt=date_format,
+        level=level,
+        handlers=[
+            logging.StreamHandler(),  # Console
+            logging.handlers.RotatingFileHandler(
+                log_file,
+                maxBytes=5 * 1024 * 1024,  # 5 MB
+                backupCount=3,
+            ),
+        ],
+    )
 
 
 def main():
     """Main entry point."""
-    logging.basicConfig(
-        format='%(asctime)s %(levelname)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        level=logging.INFO,
-    )
-
     args = parse_args()
+
+    setup_logging(verbose=args.verbose)
 
     try:
         config = load_config()
@@ -428,6 +492,11 @@ def main():
     if not config['github_token']:
         logging.warning("No GITHUB_TOKEN set. Rate limited to 60 requests/hour.")
 
+    if not config['anthropic_api_key']:
+        logging.warning("No ANTHROPIC_API_KEY set. AI-generated descriptions disabled.")
+    else:
+        logging.info("Anthropic API key configured for README summarization.")
+
     template = load_template()
 
     # Initialize BlueSky client if not in test mode
@@ -456,25 +525,27 @@ def main():
             sys.exit(1)
 
         for repo in repos:
-            # Get best available description
-            repo['description'] = get_repo_description(
+            # Get descriptions (GitHub's actual + our imputed)
+            descriptions = get_repo_descriptions(
                 repo,
                 token=config['github_token'],
                 anthropic_api_key=config['anthropic_api_key'],
             )
+            github_desc = descriptions['github_description']
+            imputed_desc = descriptions['imputed_description']
 
-            post_text = render_post(template, org['org_name'], repo)
+            post_text = render_post(template, org['org_name'], repo, imputed_desc)
 
             if config['test_mode']:
                 logging.info("--- TEST MODE: Would post ---")
                 logging.info(post_text)
                 logging.info(f"[Link Card] Title: {repo['repo_name']}")
-                logging.info(f"[Link Card] Description: {repo['description']}")
+                logging.info(f"[Link Card] Description: {github_desc or '(none)'}")
                 logging.info(f"[Link Card] URL: {repo['repo_url']}")
                 logging.info("----------------------------")
             else:
                 logging.info(f"Posting about {org['org_name']}/{repo['repo_name']}...")
-                post_to_bluesky(bluesky_client, post_text, repo)
+                post_to_bluesky(bluesky_client, post_text, repo, github_desc)
 
             total_new_repos += 1
 
