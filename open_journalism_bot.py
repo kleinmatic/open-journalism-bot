@@ -69,6 +69,54 @@ def upsert_orgs(conn, orgs):
     conn.commit()
 
 
+def insert_repo(conn, repo, org_username, is_empty=False):
+    """Insert a new repo into the database."""
+    conn.execute(
+        """INSERT OR IGNORE INTO repos
+           (full_name, org, repo_name, repo_url, language, description, is_empty, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            repo["full_name"],
+            org_username,
+            repo["repo_name"],
+            repo["repo_url"],
+            repo.get("language") or None,
+            repo.get("description") or None,
+            is_empty,
+            repo.get("created_at"),
+        ),
+    )
+    conn.commit()
+
+
+def repo_exists(conn, full_name):
+    """Check if a repo is already in the database."""
+    row = conn.execute(
+        "SELECT 1 FROM repos WHERE full_name = ?", (full_name,)
+    ).fetchone()
+    return row is not None
+
+
+def get_ready_repos(conn):
+    """Get repos that are ready to post (not empty, not yet posted)."""
+    return conn.execute(
+        """SELECT r.*, o.org_name FROM repos r
+           JOIN orgs o ON r.org = o.github_username
+           WHERE r.is_empty = 0 AND r.bluesky_post_url IS NULL"""
+    ).fetchall()
+
+
+def get_pending_empty_repos(conn):
+    """Get empty repos still within the 24h recheck window."""
+    return conn.execute(
+        """SELECT r.*, o.org_name FROM repos r
+           JOIN orgs o ON r.org = o.github_username
+           WHERE r.is_empty = 1
+             AND r.bluesky_post_url IS NULL
+             AND r.first_seen > datetime('now', '-24 hours')"""
+    ).fetchall()
+
+
 def load_config():
     """Load configuration from environment variables."""
     load_dotenv()

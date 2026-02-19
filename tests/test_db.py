@@ -1,4 +1,8 @@
-from open_journalism_bot import init_db, upsert_orgs
+from datetime import datetime, timezone, timedelta
+from open_journalism_bot import (
+    init_db, upsert_orgs, insert_repo, repo_exists,
+    get_ready_repos, get_pending_empty_repos,
+)
 
 
 def test_init_db_creates_tables(db):
@@ -57,3 +61,116 @@ def test_upsert_orgs_updates_name(db):
     upsert_orgs(db, orgs)
     row = db.execute("SELECT * FROM orgs WHERE github_username='nytimes'").fetchone()
     assert row["org_name"] == "New York Times"
+
+
+def _seed_org(db):
+    """Helper: insert a test org."""
+    upsert_orgs(db, [{"org_name": "Test Org", "github_url": "https://github.com/testorg"}])
+
+
+def test_insert_repo_and_exists(db):
+    _seed_org(db)
+    repo = {
+        "full_name": "testorg/myrepo",
+        "repo_name": "myrepo",
+        "repo_url": "https://github.com/testorg/myrepo",
+        "language": "Python",
+        "description": "A test repo",
+    }
+    assert not repo_exists(db, "testorg/myrepo")
+    insert_repo(db, repo, org_username="testorg", is_empty=False)
+    assert repo_exists(db, "testorg/myrepo")
+
+
+def test_insert_repo_empty(db):
+    _seed_org(db)
+    repo = {
+        "full_name": "testorg/empty",
+        "repo_name": "empty",
+        "repo_url": "https://github.com/testorg/empty",
+        "language": "",
+        "description": "",
+    }
+    insert_repo(db, repo, org_username="testorg", is_empty=True)
+    row = db.execute("SELECT is_empty FROM repos WHERE full_name='testorg/empty'").fetchone()
+    assert row["is_empty"] == 1
+
+
+def test_get_ready_repos(db):
+    _seed_org(db)
+    repo = {
+        "full_name": "testorg/ready",
+        "repo_name": "ready",
+        "repo_url": "https://github.com/testorg/ready",
+        "language": "Python",
+        "description": "Ready to post",
+    }
+    insert_repo(db, repo, org_username="testorg", is_empty=False)
+    ready = get_ready_repos(db)
+    assert len(ready) == 1
+    assert ready[0]["full_name"] == "testorg/ready"
+
+
+def test_get_ready_repos_excludes_posted(db):
+    _seed_org(db)
+    repo = {
+        "full_name": "testorg/posted",
+        "repo_name": "posted",
+        "repo_url": "https://github.com/testorg/posted",
+        "language": "Python",
+        "description": "Already posted",
+    }
+    insert_repo(db, repo, org_username="testorg", is_empty=False)
+    db.execute(
+        "UPDATE repos SET bluesky_post_url='https://bsky.app/post/123' WHERE full_name='testorg/posted'"
+    )
+    db.commit()
+    ready = get_ready_repos(db)
+    assert len(ready) == 0
+
+
+def test_get_ready_repos_excludes_empty(db):
+    _seed_org(db)
+    repo = {
+        "full_name": "testorg/empty",
+        "repo_name": "empty",
+        "repo_url": "https://github.com/testorg/empty",
+        "language": "",
+        "description": "",
+    }
+    insert_repo(db, repo, org_username="testorg", is_empty=True)
+    ready = get_ready_repos(db)
+    assert len(ready) == 0
+
+
+def test_get_pending_empty_repos(db):
+    _seed_org(db)
+    repo = {
+        "full_name": "testorg/pending",
+        "repo_name": "pending",
+        "repo_url": "https://github.com/testorg/pending",
+        "language": "",
+        "description": "",
+    }
+    insert_repo(db, repo, org_username="testorg", is_empty=True)
+    pending = get_pending_empty_repos(db)
+    assert len(pending) == 1
+    assert pending[0]["full_name"] == "testorg/pending"
+
+
+def test_get_pending_empty_repos_excludes_old(db):
+    """Repos first_seen > 24h ago should not appear as pending."""
+    _seed_org(db)
+    repo = {
+        "full_name": "testorg/old-empty",
+        "repo_name": "old-empty",
+        "repo_url": "https://github.com/testorg/old-empty",
+        "language": "",
+        "description": "",
+    }
+    insert_repo(db, repo, org_username="testorg", is_empty=True)
+    old_time = (datetime.now(timezone.utc) - timedelta(hours=25)).strftime("%Y-%m-%d %H:%M:%S")
+    db.execute("UPDATE repos SET first_seen=? WHERE full_name='testorg/old-empty'", (old_time,))
+    db.commit()
+    pending = get_pending_empty_repos(db)
+    assert len(pending) == 0
