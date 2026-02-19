@@ -4,7 +4,7 @@ from open_journalism_bot import (
     init_db, upsert_orgs, insert_repo, repo_exists,
     get_ready_repos, get_pending_empty_repos,
     mark_repo_posted, mark_repo_not_empty,
-    recheck_empty_repo,
+    recheck_empty_repo, is_repo_empty,
 )
 
 
@@ -279,3 +279,19 @@ def test_recheck_empty_repo_404(db):
         changed = recheck_empty_repo(db, "testorg/deleted", token=None)
 
     assert changed is False
+
+
+def test_is_repo_empty_true():
+    """No description, no language = empty."""
+    repo = {"description": "", "language": "", "full_name": "org/repo"}
+    assert is_repo_empty(repo) is True
+
+
+def test_is_repo_empty_false_description():
+    repo = {"description": "A real project", "language": "", "full_name": "org/repo"}
+    assert is_repo_empty(repo) is False
+
+
+def test_is_repo_empty_false_language():
+    repo = {"description": "", "language": "Python", "full_name": "org/repo"}
+    assert is_repo_empty(repo) is False

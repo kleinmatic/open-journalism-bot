@@ -171,6 +171,11 @@ def recheck_empty_repo(conn, full_name, token=None):
         return False
 
 
+def is_repo_empty(repo):
+    """Determine if a repo appears to be empty (no description, no language)."""
+    return not repo.get("description") and not repo.get("language")
+
+
 def load_config():
     """Load configuration from environment variables."""
     load_dotenv()
