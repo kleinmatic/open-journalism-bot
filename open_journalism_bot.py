@@ -54,6 +54,21 @@ def init_db(db_path):
     return conn
 
 
+def upsert_orgs(conn, orgs):
+    """Insert or update orgs from the CSV org list."""
+    for org in orgs:
+        username = extract_github_username(org["github_url"])
+        conn.execute(
+            """INSERT INTO orgs (github_username, org_name, github_url)
+               VALUES (?, ?, ?)
+               ON CONFLICT(github_username) DO UPDATE SET
+                   org_name = excluded.org_name,
+                   github_url = excluded.github_url""",
+            (username, org["org_name"], org["github_url"]),
+        )
+    conn.commit()
+
+
 def load_config():
     """Load configuration from environment variables."""
     load_dotenv()

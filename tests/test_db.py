@@ -1,4 +1,4 @@
-from open_journalism_bot import init_db
+from open_journalism_bot import init_db, upsert_orgs
 
 
 def test_init_db_creates_tables(db):
@@ -34,3 +34,26 @@ def test_init_db_idempotent(db):
     """Calling init_db twice should not error (IF NOT EXISTS)."""
     from open_journalism_bot import init_db
     init_db(":memory:")  # separate connection, but proves no crash
+
+
+def test_upsert_orgs_inserts(db):
+    """upsert_orgs should insert new orgs."""
+    orgs = [
+        {"org_name": "New York Times", "github_url": "https://github.com/nytimes"},
+        {"org_name": "ProPublica", "github_url": "https://github.com/propublica"},
+    ]
+    upsert_orgs(db, orgs)
+    rows = db.execute("SELECT * FROM orgs ORDER BY github_username").fetchall()
+    assert len(rows) == 2
+    assert rows[0]["github_username"] == "nytimes"
+    assert rows[0]["org_name"] == "New York Times"
+
+
+def test_upsert_orgs_updates_name(db):
+    """upsert_orgs should update org_name if it changes."""
+    orgs = [{"org_name": "NYT", "github_url": "https://github.com/nytimes"}]
+    upsert_orgs(db, orgs)
+    orgs = [{"org_name": "New York Times", "github_url": "https://github.com/nytimes"}]
+    upsert_orgs(db, orgs)
+    row = db.execute("SELECT * FROM orgs WHERE github_username='nytimes'").fetchone()
+    assert row["org_name"] == "New York Times"
