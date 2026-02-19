@@ -49,6 +49,9 @@ def init_db(db_path):
             bluesky_post_url TEXT,
             bluesky_post_date TIMESTAMP
         );
+
+        CREATE INDEX IF NOT EXISTS idx_repos_status
+            ON repos(is_empty, bluesky_post_url);
     """)
     conn.commit()
     return conn
@@ -161,6 +164,13 @@ def recheck_empty_repo(conn, full_name, token=None):
         if description or language:
             logging.info(f"{full_name}: repo now has content (desc={bool(description)}, lang={language})")
             mark_repo_not_empty(conn, full_name, description=description or None, language=language or None)
+            return True
+
+        # No description/language yet — check if a README was pushed
+        readme = fetch_readme(full_name, token)
+        if readme:
+            logging.info(f"{full_name}: no description/language but has README ({len(readme)} chars)")
+            mark_repo_not_empty(conn, full_name)
             return True
 
         logging.info(f"{full_name}: still empty on recheck")

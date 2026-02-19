@@ -262,6 +262,43 @@ def test_recheck_empty_repo_still_empty(db):
     assert row["is_empty"] == 1
 
 
+def test_recheck_empty_repo_finds_readme(db):
+    """When a repo has no description but gains a README, it should be marked not-empty."""
+    _seed_org(db)
+    repo = {
+        "full_name": "testorg/readme-only",
+        "repo_name": "readme-only",
+        "repo_url": "https://github.com/testorg/readme-only",
+        "language": "",
+        "description": "",
+    }
+    insert_repo(db, repo, org_username="testorg", is_empty=True)
+
+    # Repo API still returns no description/language
+    mock_repo_data = {"description": None, "language": None}
+    # But README exists
+    mock_readme_response = type("Response", (), {
+        "status_code": 200,
+        "json": lambda self: {"content": "IyBIZWxsbw=="},  # base64 "# Hello"
+    })()
+
+    def mock_get_side_effect(url, **kwargs):
+        if "/readme" in url:
+            return mock_readme_response
+        mock_resp = type("Response", (), {
+            "status_code": 200,
+            "json": lambda self: mock_repo_data,
+        })()
+        return mock_resp
+
+    with patch("open_journalism_bot.requests.get", side_effect=mock_get_side_effect):
+        changed = recheck_empty_repo(db, "testorg/readme-only", token=None)
+
+    assert changed is True
+    row = db.execute("SELECT * FROM repos WHERE full_name='testorg/readme-only'").fetchone()
+    assert row["is_empty"] == 0
+
+
 def test_recheck_empty_repo_404(db):
     """Deleted repos should be treated as abandoned (no crash)."""
     _seed_org(db)
