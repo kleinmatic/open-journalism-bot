@@ -10,6 +10,7 @@ import io
 import logging
 import logging.handlers
 import os
+import sqlite3
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -19,6 +20,38 @@ import chevron
 import requests
 from atproto import Client, models
 from dotenv import load_dotenv
+
+
+def init_db(db_path):
+    """Initialize SQLite database and return connection."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS orgs (
+            github_username TEXT PRIMARY KEY,
+            org_name        TEXT NOT NULL,
+            github_url      TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS repos (
+            full_name        TEXT PRIMARY KEY,
+            org              TEXT NOT NULL REFERENCES orgs(github_username),
+            repo_name        TEXT NOT NULL,
+            repo_url         TEXT NOT NULL,
+            language         TEXT,
+            description      TEXT,
+            summary          TEXT,
+            is_empty         BOOLEAN NOT NULL DEFAULT 0,
+            created_at       TIMESTAMP,
+            first_seen       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            bluesky_post_url TEXT,
+            bluesky_post_date TIMESTAMP
+        );
+    """)
+    conn.commit()
+    return conn
 
 
 def load_config():
