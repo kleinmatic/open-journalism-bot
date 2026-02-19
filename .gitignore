@@ -43,3 +43,6 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Data (SQLite databases)
+data/*.db

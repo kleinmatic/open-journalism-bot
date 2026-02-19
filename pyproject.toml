@@ -11,5 +11,10 @@ dependencies = [
     "requests>=2.32.5",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
 [project.scripts]
 open-journalism-bot = "open_journalism_bot:main"
