@@ -322,6 +322,7 @@ def fetch_recent_repos(github_url, token=None, minutes=15):
                 'description': repo.get('description') or '',
                 'repo_url': repo['html_url'],
                 'language': repo.get('language') or '',
+                'created_at': repo['created_at'],
             })
 
     return new_repos
@@ -662,8 +663,8 @@ def main():
             orgs = orgs[:args.limit]
             logging.info(f"Limited to first {args.limit} organizations")
 
-    if not dry_run:
-        upsert_orgs(conn, orgs)
+    # In dry-run mode the DB is in-memory, so writes are side-effect-free
+    upsert_orgs(conn, orgs)
 
     logging.info(f"Checking {len(orgs)} organizations for repos created in last {config['check_minutes']} minutes...")
 
@@ -706,8 +707,7 @@ def main():
                 continue
 
             empty = is_repo_empty(repo)
-            if not dry_run:
-                insert_repo(conn, repo, org_username=username, is_empty=empty)
+            insert_repo(conn, repo, org_username=username, is_empty=empty)
 
             if empty:
                 empty_count += 1
@@ -719,71 +719,55 @@ def main():
     # Phase 2: Recheck pending empty repos
     rechecked = 0
     recovered = 0
-    if not dry_run:
-        pending = get_pending_empty_repos(conn)
-        for row in pending:
-            changed = recheck_empty_repo(conn, row['full_name'], token=config['github_token'])
+    pending = get_pending_empty_repos(conn)
+    for row in pending:
+        if dry_run:
+            logging.info(f"{row['full_name']}: would recheck (pending empty repo)")
             rechecked += 1
-            if changed:
-                recovered += 1
+            continue
+        changed = recheck_empty_repo(conn, row['full_name'], token=config['github_token'])
+        rechecked += 1
+        if changed:
+            recovered += 1
 
     # Phase 3: Post ready repos
     posted = 0
-    if dry_run:
-        # In dry-run mode, process newly-found non-empty repos the old way
-        for org in orgs:
-            try:
-                repos = fetch_recent_repos(
-                    org['github_url'],
-                    token=config['github_token'],
-                    minutes=config['check_minutes'],
-                )
-            except RateLimitError:
-                break
-            for repo in repos:
-                if is_repo_empty(repo):
-                    continue
-                descriptions = get_repo_descriptions(
-                    repo,
-                    token=config['github_token'],
-                    anthropic_api_key=config['anthropic_api_key'],
-                )
-                post_text = render_post(template, org['org_name'], repo, descriptions['imputed_description'])
-                logging.info("--- DRY RUN: Would post ---")
-                logging.info(post_text)
-                logging.info(f"[Link Card] Title: {repo['repo_name']}")
-                logging.info(f"[Link Card] Description: {descriptions['github_description'] or '(none)'}")
-                logging.info(f"[Link Card] URL: {repo['repo_url']}")
-                logging.info("----------------------------")
-                posted += 1
-    else:
-        ready = get_ready_repos(conn)
-        for row in ready:
-            repo = {
-                'full_name': row['full_name'],
-                'repo_name': row['repo_name'],
-                'repo_url': row['repo_url'],
-                'language': row['language'] or '',
-                'description': row['description'] or '',
-            }
-            descriptions = get_repo_descriptions(
-                repo,
-                token=config['github_token'],
-                anthropic_api_key=config['anthropic_api_key'],
+    ready = get_ready_repos(conn)
+    for row in ready:
+        repo = {
+            'full_name': row['full_name'],
+            'repo_name': row['repo_name'],
+            'repo_url': row['repo_url'],
+            'language': row['language'] or '',
+            'description': row['description'] or '',
+        }
+        descriptions = get_repo_descriptions(
+            repo,
+            token=config['github_token'],
+            anthropic_api_key=config['anthropic_api_key'],
+        )
+        # Store summary if we got one
+        if descriptions['imputed_description']:
+            conn.execute(
+                "UPDATE repos SET summary = ? WHERE full_name = ?",
+                (descriptions['imputed_description'], row['full_name']),
             )
-            # Store summary if we got one
-            if descriptions['imputed_description']:
-                conn.execute(
-                    "UPDATE repos SET summary = ? WHERE full_name = ?",
-                    (descriptions['imputed_description'], row['full_name']),
-                )
-                conn.commit()
+            conn.commit()
 
-            post_text = render_post(template, row['org_name'], repo, descriptions['imputed_description'])
+        post_text = render_post(template, row['org_name'], repo, descriptions['imputed_description'])
+
+        if dry_run:
+            logging.info("--- DRY RUN: Would post ---")
+            logging.info(post_text)
+            logging.info(f"[Link Card] Title: {repo['repo_name']}")
+            logging.info(f"[Link Card] Description: {descriptions['github_description'] or '(none)'}")
+            logging.info(f"[Link Card] URL: {repo['repo_url']}")
+            logging.info("----------------------------")
+        else:
             logging.info(f"Posting about {row['org_name']}/{row['repo_name']}...")
             post_uri = post_to_bluesky(bluesky_client, post_text, repo, descriptions['github_description'])
             mark_repo_posted(conn, row['full_name'], post_uri or "posted")
-            posted += 1
+        posted += 1
 
     # Stats
     logging.info(
