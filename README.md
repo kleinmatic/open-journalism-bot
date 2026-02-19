@@ -6,7 +6,7 @@ Monitor GitHub accounts from journalism organizations and post to BlueSky when n
 
 This is a spiritual successor to [@newsnerdrepos](https://x.com/newsnerdrepos), a Twitter bot that tracked open source releases from news organizations. With Twitter's API changes, the bot went dormant. This project brings it back on BlueSky.
 
-Uses the [palewire/open-journalism](https://github.com/palewire/open-journalism) list of news organization GitHub accounts.
+Uses the [silva-shih/open-journalism](https://github.com/silva-shih/open-journalism) list of news organization GitHub accounts.
 
 ## Quick Start
 
@@ -49,7 +49,7 @@ cp .env.example .env
 Edit `.env` with your credentials:
 
 ```bash
-CSV_URL=https://raw.githubusercontent.com/palewire/open-journalism/master/orgs.csv
+CSV_URL=https://raw.githubusercontent.com/silva-shih/open-journalism/master/orgs.csv
 GITHUB_TOKEN=github_pat_xxxxx
 BLUESKY_HANDLE=your-handle.bsky.social
 BLUESKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
