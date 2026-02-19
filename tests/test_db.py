@@ -1,8 +1,10 @@
 from datetime import datetime, timezone, timedelta
+from unittest.mock import patch
 from open_journalism_bot import (
     init_db, upsert_orgs, insert_repo, repo_exists,
     get_ready_repos, get_pending_empty_repos,
     mark_repo_posted, mark_repo_not_empty,
+    recheck_empty_repo,
 )
 
 
@@ -208,3 +210,72 @@ def test_mark_repo_not_empty(db):
     assert row["is_empty"] == 0
     assert row["description"] == "Now has content"
     assert row["language"] == "Python"
+
+
+def test_recheck_empty_repo_finds_content(db):
+    """When a repo gains a description, it should be marked not-empty."""
+    _seed_org(db)
+    repo = {
+        "full_name": "testorg/filling-up",
+        "repo_name": "filling-up",
+        "repo_url": "https://github.com/testorg/filling-up",
+        "language": "",
+        "description": "",
+    }
+    insert_repo(db, repo, org_username="testorg", is_empty=True)
+
+    mock_repo_data = {
+        "description": "A real project",
+        "language": "JavaScript",
+    }
+    with patch("open_journalism_bot.requests.get") as mock_get:
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = mock_repo_data
+        changed = recheck_empty_repo(db, "testorg/filling-up", token=None)
+
+    assert changed is True
+    row = db.execute("SELECT * FROM repos WHERE full_name='testorg/filling-up'").fetchone()
+    assert row["is_empty"] == 0
+    assert row["description"] == "A real project"
+
+
+def test_recheck_empty_repo_still_empty(db):
+    """When a repo is still empty, it stays marked empty."""
+    _seed_org(db)
+    repo = {
+        "full_name": "testorg/still-empty",
+        "repo_name": "still-empty",
+        "repo_url": "https://github.com/testorg/still-empty",
+        "language": "",
+        "description": "",
+    }
+    insert_repo(db, repo, org_username="testorg", is_empty=True)
+
+    mock_repo_data = {"description": None, "language": None}
+    with patch("open_journalism_bot.requests.get") as mock_get:
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = mock_repo_data
+        changed = recheck_empty_repo(db, "testorg/still-empty", token=None)
+
+    assert changed is False
+    row = db.execute("SELECT * FROM repos WHERE full_name='testorg/still-empty'").fetchone()
+    assert row["is_empty"] == 1
+
+
+def test_recheck_empty_repo_404(db):
+    """Deleted repos should be treated as abandoned (no crash)."""
+    _seed_org(db)
+    repo = {
+        "full_name": "testorg/deleted",
+        "repo_name": "deleted",
+        "repo_url": "https://github.com/testorg/deleted",
+        "language": "",
+        "description": "",
+    }
+    insert_repo(db, repo, org_username="testorg", is_empty=True)
+
+    with patch("open_journalism_bot.requests.get") as mock_get:
+        mock_get.return_value.status_code = 404
+        changed = recheck_empty_repo(db, "testorg/deleted", token=None)
+
+    assert changed is False

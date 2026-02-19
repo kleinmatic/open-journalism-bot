@@ -137,6 +137,40 @@ def mark_repo_not_empty(conn, full_name, description=None, language=None, summar
     conn.commit()
 
 
+def recheck_empty_repo(conn, full_name, token=None):
+    """
+    Re-fetch a repo from GitHub to see if it has content now.
+    Returns True if the repo was updated (no longer empty), False otherwise.
+    """
+    headers = get_github_headers(token)
+    url = f"https://api.github.com/repos/{full_name}"
+
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        if response.status_code == 404:
+            logging.info(f"{full_name}: repo deleted, treating as abandoned")
+            return False
+        if response.status_code != 200:
+            logging.warning(f"{full_name}: recheck got status {response.status_code}")
+            return False
+
+        data = response.json()
+        description = data.get("description") or ""
+        language = data.get("language") or ""
+
+        if description or language:
+            logging.info(f"{full_name}: repo now has content (desc={bool(description)}, lang={language})")
+            mark_repo_not_empty(conn, full_name, description=description or None, language=language or None)
+            return True
+
+        logging.info(f"{full_name}: still empty on recheck")
+        return False
+
+    except requests.exceptions.RequestException as e:
+        logging.warning(f"{full_name}: recheck failed: {e}")
+        return False
+
+
 def load_config():
     """Load configuration from environment variables."""
     load_dotenv()
