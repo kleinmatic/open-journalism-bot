@@ -61,8 +61,20 @@ tail -f logs/bot.log
 - `requests` - HTTP requests (GitHub API, CSV fetch)
 - `python-dotenv` - Environment variable loading
 
+## Current Work: Empty Repo Handling
+
+Design approved, ready for implementation. See `docs/plans/2026-02-19-empty-repo-handling-design.md`.
+
+**Summary:** Empty repos (caught mid-creation) are held back and rechecked hourly for up to 24 hours. If content appears, post with accurate description. If still empty after 24h, skip silently.
+
+**Key changes:**
+- SQLite database at `data/oj-bot.db` with `orgs` and `repos` tables
+- `--dry-run` becomes fully side-effect-free (no database writes)
+- New `--db PATH` flag for testing with alternate database
+- pytest for unit tests
+
 ## Phase 2 TODO
 
 - [ ] GitHub Actions workflow for scheduled runs
-- [ ] SQLite database for tracking posted repos (eliminates timing-based duplicate prevention)
+- [x] SQLite database for tracking posted repos (in progress — part of empty repo handling)
 - [ ] Thumbnail images in link cards (requires fetching OpenGraph images)
