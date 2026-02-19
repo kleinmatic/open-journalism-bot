@@ -51,7 +51,7 @@ Edit `.env` with your credentials:
 ```bash
 CSV_URL=https://raw.githubusercontent.com/palewire/open-journalism/master/orgs.csv
 GITHUB_TOKEN=github_pat_xxxxx
-BLUESKY_HANDLE=openjournalism.bsky.social
+BLUESKY_HANDLE=your-handle.bsky.social
 BLUESKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
 CHECK_MINUTES=59
 TEST_MODE=true

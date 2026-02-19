@@ -1,5 +1,0 @@
-New repo from {{org_name}}:
-
-{{repo_name}}{{#description}}: {{description}}{{/description}}
-
-{{repo_url}}

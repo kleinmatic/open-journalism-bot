@@ -44,5 +44,8 @@ env/
 .DS_Store
 Thumbs.db
 
-# Data (SQLite databases)
+# Data (SQLite databases and WAL/journal files)
 data/*.db
+data/*.db-shm
+data/*.db-wal
+data/*.db-journal
