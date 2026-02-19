@@ -518,6 +518,12 @@ def parse_args():
         action='store_true',
         help='Enable verbose/debug logging'
     )
+    parser.add_argument(
+        '--db',
+        type=str,
+        default=None,
+        help='Path to SQLite database (default: data/oj-bot.db)'
+    )
     return parser.parse_args()
 
 
