@@ -117,6 +117,26 @@ def get_pending_empty_repos(conn):
     ).fetchall()
 
 
+def mark_repo_posted(conn, full_name, post_url):
+    """Record that a repo has been posted to BlueSky."""
+    conn.execute(
+        """UPDATE repos SET bluesky_post_url = ?, bluesky_post_date = datetime('now')
+           WHERE full_name = ?""",
+        (post_url, full_name),
+    )
+    conn.commit()
+
+
+def mark_repo_not_empty(conn, full_name, description=None, language=None, summary=None):
+    """Update a previously-empty repo with new content."""
+    conn.execute(
+        """UPDATE repos SET is_empty = 0, description = ?, language = ?, summary = ?
+           WHERE full_name = ?""",
+        (description, language, summary, full_name),
+    )
+    conn.commit()
+
+
 def load_config():
     """Load configuration from environment variables."""
     load_dotenv()

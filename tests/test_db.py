@@ -2,6 +2,7 @@ from datetime import datetime, timezone, timedelta
 from open_journalism_bot import (
     init_db, upsert_orgs, insert_repo, repo_exists,
     get_ready_repos, get_pending_empty_repos,
+    mark_repo_posted, mark_repo_not_empty,
 )
 
 
@@ -174,3 +175,36 @@ def test_get_pending_empty_repos_excludes_old(db):
     db.commit()
     pending = get_pending_empty_repos(db)
     assert len(pending) == 0
+
+
+def test_mark_repo_posted(db):
+    _seed_org(db)
+    repo = {
+        "full_name": "testorg/topost",
+        "repo_name": "topost",
+        "repo_url": "https://github.com/testorg/topost",
+        "language": "Python",
+        "description": "Will be posted",
+    }
+    insert_repo(db, repo, org_username="testorg", is_empty=False)
+    mark_repo_posted(db, "testorg/topost", "https://bsky.app/post/abc123")
+    row = db.execute("SELECT * FROM repos WHERE full_name='testorg/topost'").fetchone()
+    assert row["bluesky_post_url"] == "https://bsky.app/post/abc123"
+    assert row["bluesky_post_date"] is not None
+
+
+def test_mark_repo_not_empty(db):
+    _seed_org(db)
+    repo = {
+        "full_name": "testorg/was-empty",
+        "repo_name": "was-empty",
+        "repo_url": "https://github.com/testorg/was-empty",
+        "language": "",
+        "description": "",
+    }
+    insert_repo(db, repo, org_username="testorg", is_empty=True)
+    mark_repo_not_empty(db, "testorg/was-empty", description="Now has content", language="Python")
+    row = db.execute("SELECT * FROM repos WHERE full_name='testorg/was-empty'").fetchone()
+    assert row["is_empty"] == 0
+    assert row["description"] == "Now has content"
+    assert row["language"] == "Python"
