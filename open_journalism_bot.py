@@ -513,9 +513,10 @@ def create_link_card(repo, github_description=''):
 
 
 def post_to_bluesky(client, text, repo, github_description=''):
-    """Post text to BlueSky with a link card."""
+    """Post text to BlueSky with a link card. Returns the post URI."""
     embed = create_link_card(repo, github_description)
-    client.send_post(text=text, embed=embed)
+    response = client.send_post(text=text, embed=embed)
+    return response.uri
 
 
 def parse_args():
@@ -611,7 +612,27 @@ def main():
     if args.dry_run:
         config['test_mode'] = True
 
-    # Fetch CSV (needed for both normal mode and --org lookup)
+    # Database setup
+    dry_run = config['test_mode']
+    db_path = args.db or str(Path(__file__).parent / 'data' / 'oj-bot.db')
+
+    if dry_run:
+        # Dry run: use in-memory DB seeded from disk if it exists
+        conn = init_db(":memory:")
+        disk_db = Path(db_path)
+        if disk_db.exists():
+            disk_conn = sqlite3.connect(str(disk_db))
+            disk_conn.backup(conn)
+            disk_conn.close()
+            logging.info(f"Dry run: loaded snapshot from {db_path}")
+        else:
+            logging.info("Dry run: using fresh in-memory database")
+    else:
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        conn = init_db(db_path)
+        logging.info(f"Using database: {db_path}")
+
+    # Fetch and sync orgs
     logging.info(f"Fetching CSV from {config['csv_url']}...")
     try:
         csv_content = fetch_csv(config['csv_url'])
@@ -621,38 +642,33 @@ def main():
 
     all_orgs = parse_csv(csv_content)
 
-    # If --org is specified, find that org in the CSV
+    # Handle --org filter
     if args.org:
         handle = args.org.lower().rstrip('/')
-        # Allow either "striblab" or "https://github.com/striblab"
         if handle.startswith('http'):
             handle = handle.split('/')[-1]
-
-        # Find matching org in CSV
         matching = [o for o in all_orgs if extract_github_username(o['github_url']).lower() == handle]
-
         if matching:
             orgs = matching
             logging.info(f"Testing single org: {orgs[0]['org_name']}")
         else:
-            # Not in CSV, use handle as fallback
             github_url = f'https://github.com/{handle}'
             display_name = args.name if args.name else handle
             orgs = [{'org_name': display_name, 'github_url': github_url}]
             logging.info(f"Org '{handle}' not found in CSV, using handle as name")
     else:
         orgs = all_orgs
-
-        # Apply limit if specified
         if args.limit > 0:
             orgs = orgs[:args.limit]
             logging.info(f"Limited to first {args.limit} organizations")
+
+    if not dry_run:
+        upsert_orgs(conn, orgs)
 
     logging.info(f"Checking {len(orgs)} organizations for repos created in last {config['check_minutes']} minutes...")
 
     if not config['github_token']:
         logging.warning("No GITHUB_TOKEN set. Rate limited to 60 requests/hour.")
-
     if not config['anthropic_api_key']:
         logging.warning("No ANTHROPIC_API_KEY set. AI-generated descriptions disabled.")
     else:
@@ -662,15 +678,18 @@ def main():
 
     # Initialize BlueSky client if not in test mode
     bluesky_client = None
-    if not config['test_mode']:
+    if not dry_run:
         logging.info("Logging into BlueSky...")
         bluesky_client = Client()
         bluesky_client.login(config['bluesky_handle'], config['bluesky_password'])
 
-    total_new_repos = 0
+    # Phase 1: Discover new repos
+    new_count = 0
+    empty_count = 0
     orgs_checked = 0
 
     for org in orgs:
+        username = extract_github_username(org['github_url'])
         try:
             repos = fetch_recent_repos(
                 org['github_url'],
@@ -679,38 +698,101 @@ def main():
             )
             orgs_checked += 1
         except RateLimitError as e:
-            logging.error("GitHub API rate limit exceeded!")
-            logging.error(f"Checked {orgs_checked} of {len(orgs)} organizations before hitting limit.")
-            logging.error(f"Rate limit resets at: {e.reset_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-            logging.error("Tip: Set GITHUB_TOKEN in .env for 5000 requests/hour.")
-            sys.exit(1)
+            logging.error(f"Rate limit hit after {orgs_checked} orgs: {e}")
+            break
 
         for repo in repos:
-            # Get descriptions (GitHub's actual + our imputed)
+            if repo_exists(conn, repo['full_name']):
+                continue
+
+            empty = is_repo_empty(repo)
+            if not dry_run:
+                insert_repo(conn, repo, org_username=username, is_empty=empty)
+
+            if empty:
+                empty_count += 1
+                logging.info(f"{repo['full_name']}: empty, holding back for recheck")
+            else:
+                new_count += 1
+                logging.info(f"{repo['full_name']}: new repo with content")
+
+    # Phase 2: Recheck pending empty repos
+    rechecked = 0
+    recovered = 0
+    if not dry_run:
+        pending = get_pending_empty_repos(conn)
+        for row in pending:
+            changed = recheck_empty_repo(conn, row['full_name'], token=config['github_token'])
+            rechecked += 1
+            if changed:
+                recovered += 1
+
+    # Phase 3: Post ready repos
+    posted = 0
+    if dry_run:
+        # In dry-run mode, process newly-found non-empty repos the old way
+        for org in orgs:
+            try:
+                repos = fetch_recent_repos(
+                    org['github_url'],
+                    token=config['github_token'],
+                    minutes=config['check_minutes'],
+                )
+            except RateLimitError:
+                break
+            for repo in repos:
+                if is_repo_empty(repo):
+                    continue
+                descriptions = get_repo_descriptions(
+                    repo,
+                    token=config['github_token'],
+                    anthropic_api_key=config['anthropic_api_key'],
+                )
+                post_text = render_post(template, org['org_name'], repo, descriptions['imputed_description'])
+                logging.info("--- DRY RUN: Would post ---")
+                logging.info(post_text)
+                logging.info(f"[Link Card] Title: {repo['repo_name']}")
+                logging.info(f"[Link Card] Description: {descriptions['github_description'] or '(none)'}")
+                logging.info(f"[Link Card] URL: {repo['repo_url']}")
+                logging.info("----------------------------")
+                posted += 1
+    else:
+        ready = get_ready_repos(conn)
+        for row in ready:
+            repo = {
+                'full_name': row['full_name'],
+                'repo_name': row['repo_name'],
+                'repo_url': row['repo_url'],
+                'language': row['language'] or '',
+                'description': row['description'] or '',
+            }
             descriptions = get_repo_descriptions(
                 repo,
                 token=config['github_token'],
                 anthropic_api_key=config['anthropic_api_key'],
             )
-            github_desc = descriptions['github_description']
-            imputed_desc = descriptions['imputed_description']
+            # Store summary if we got one
+            if descriptions['imputed_description']:
+                conn.execute(
+                    "UPDATE repos SET summary = ? WHERE full_name = ?",
+                    (descriptions['imputed_description'], row['full_name']),
+                )
+                conn.commit()
 
-            post_text = render_post(template, org['org_name'], repo, imputed_desc)
+            post_text = render_post(template, row['org_name'], repo, descriptions['imputed_description'])
+            logging.info(f"Posting about {row['org_name']}/{row['repo_name']}...")
+            post_uri = post_to_bluesky(bluesky_client, post_text, repo, descriptions['github_description'])
+            mark_repo_posted(conn, row['full_name'], post_uri or "posted")
+            posted += 1
 
-            if config['test_mode']:
-                logging.info("--- TEST MODE: Would post ---")
-                logging.info(post_text)
-                logging.info(f"[Link Card] Title: {repo['repo_name']}")
-                logging.info(f"[Link Card] Description: {github_desc or '(none)'}")
-                logging.info(f"[Link Card] URL: {repo['repo_url']}")
-                logging.info("----------------------------")
-            else:
-                logging.info(f"Posting about {org['org_name']}/{repo['repo_name']}...")
-                post_to_bluesky(bluesky_client, post_text, repo, github_desc)
-
-            total_new_repos += 1
-
-    logging.info(f"Done. Checked {orgs_checked} organizations, found {total_new_repos} new repos.")
+    # Stats
+    logging.info(
+        f"Done. Checked {orgs_checked} orgs. "
+        f"New: {new_count}, held back (empty): {empty_count}, "
+        f"rechecked: {rechecked}, recovered: {recovered}, "
+        f"posted: {posted}."
+    )
+    conn.close()
 
 
 if __name__ == '__main__':
