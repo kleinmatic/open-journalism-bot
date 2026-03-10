@@ -36,23 +36,45 @@ def init_db(db_path):
         );
 
         CREATE TABLE IF NOT EXISTS repos (
-            full_name        TEXT PRIMARY KEY,
-            org              TEXT NOT NULL REFERENCES orgs(github_username),
-            repo_name        TEXT NOT NULL,
-            repo_url         TEXT NOT NULL,
-            language         TEXT,
-            description      TEXT,
-            summary          TEXT,
-            is_empty         BOOLEAN NOT NULL DEFAULT 0,
-            created_at       TIMESTAMP,
-            first_seen       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            bluesky_post_url TEXT,
-            bluesky_post_date TIMESTAMP
+            full_name             TEXT PRIMARY KEY,
+            org                   TEXT NOT NULL REFERENCES orgs(github_username),
+            repo_name             TEXT NOT NULL,
+            repo_url              TEXT NOT NULL,
+            language              TEXT,
+            description           TEXT,
+            summary               TEXT,
+            is_empty              BOOLEAN NOT NULL DEFAULT 0,
+            created_at            TIMESTAMP,
+            first_seen            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            bluesky_post_url      TEXT,
+            bluesky_post_date     TIMESTAMP,
+            earliest_commit_date  TIMESTAMP,
+            homepage_url          TEXT,
+            committer_login       TEXT,
+            committer_name        TEXT,
+            committer_bio         TEXT,
+            claude_summary        TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_repos_status
             ON repos(is_empty, bluesky_post_url);
     """)
+
+    # Migration: add new columns to existing databases (no-op if already present)
+    new_columns = [
+        ("earliest_commit_date", "TIMESTAMP"),
+        ("homepage_url", "TEXT"),
+        ("committer_login", "TEXT"),
+        ("committer_name", "TEXT"),
+        ("committer_bio", "TEXT"),
+        ("claude_summary", "TEXT"),
+    ]
+    for col_name, col_type in new_columns:
+        try:
+            conn.execute(f"ALTER TABLE repos ADD COLUMN {col_name} {col_type}")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
     conn.commit()
     return conn
 

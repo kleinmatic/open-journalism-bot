@@ -33,6 +33,8 @@ def test_init_db_repos_schema(db):
         "full_name", "org", "repo_name", "repo_url", "language",
         "description", "summary", "is_empty", "created_at",
         "first_seen", "bluesky_post_url", "bluesky_post_date",
+        "earliest_commit_date", "homepage_url", "committer_login",
+        "committer_name", "committer_bio", "claude_summary",
     }
     assert columns == expected
 
@@ -332,3 +334,15 @@ def test_is_repo_empty_false_description():
 def test_is_repo_empty_false_language():
     repo = {"description": "", "language": "Python", "full_name": "org/repo"}
     assert is_repo_empty(repo) is False
+
+
+def test_schema_has_metadata_columns(db):
+    """New metadata columns exist in the repos table."""
+    row = db.execute("PRAGMA table_info(repos)").fetchall()
+    col_names = [r[1] for r in row]
+    assert "earliest_commit_date" in col_names
+    assert "homepage_url" in col_names
+    assert "committer_login" in col_names
+    assert "committer_name" in col_names
+    assert "committer_bio" in col_names
+    assert "claude_summary" in col_names
