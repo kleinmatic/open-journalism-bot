@@ -52,6 +52,8 @@ tail -f logs/bot.log
 ## Environment Notes
 
 - No `jq` installed - use Python for JSON parsing: `curl ... | python3 -c "import sys,json; ..."`
+- GitHub Events API (`/orgs/{org}/events`) strips PushEvent commit data — do NOT use for counting commits
+- Use Search Commits API instead: `gh api search/commits -X GET -f 'q=org:<org> committer-date:<start>..<end>' -f 'per_page=1' --jq '.total_count'` (30 req/min rate limit)
 
 ## Key Dependencies
 
@@ -79,7 +81,7 @@ Backfill scripts (uncommitted utilities):
 
 ## Newsletter Summaries
 
-`/repo-summaries <date range>` skill reads from SQLite and generates summaries to `summaries/` (git-ignored). Falls back to WebFetch for repos missing `claude_summary`.
+`/repo-summaries <date range>` skill reads from SQLite and generates summaries to `summaries/` (git-ignored). Falls back to WebFetch for repos missing `claude_summary`. Also includes a "most active orgs" top 10 by public commit count via Search Commits API.
 
 ## Phase 2 TODO
 
