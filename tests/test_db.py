@@ -374,6 +374,42 @@ def test_schema_has_metadata_columns(db):
     assert "claude_summary" in col_names
 
 
+def test_generate_claude_summary(db):
+    """generate_claude_summary returns a 3-5 sentence summary."""
+    from unittest.mock import patch, MagicMock
+    from open_journalism_bot import generate_claude_summary
+
+    mock_message = MagicMock()
+    mock_message.content = [MagicMock(text="This project analyzes data. It uses Python and pandas. Built by a newsroom for investigative journalism.")]
+
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_message
+
+    with patch("open_journalism_bot.anthropic.Anthropic", return_value=mock_client):
+        result = generate_claude_summary("# My Project\nThis analyzes data.", "fake-key")
+
+    assert result is not None
+    assert len(result) > 50
+    assert "BOILERPLATE" not in result
+
+
+def test_generate_claude_summary_boilerplate(db):
+    """generate_claude_summary returns None for boilerplate."""
+    from unittest.mock import patch, MagicMock
+    from open_journalism_bot import generate_claude_summary
+
+    mock_message = MagicMock()
+    mock_message.content = [MagicMock(text="BOILERPLATE")]
+
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = mock_message
+
+    with patch("open_journalism_bot.anthropic.Anthropic", return_value=mock_client):
+        result = generate_claude_summary("# Getting Started\nRun npm install", "fake-key")
+
+    assert result is None
+
+
 def test_fetch_repo_metadata_basic(db):
     """fetch_repo_metadata returns earliest commit, committer info."""
     from unittest.mock import patch, MagicMock
