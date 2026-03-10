@@ -336,6 +336,32 @@ def test_is_repo_empty_false_language():
     assert is_repo_empty(repo) is False
 
 
+def test_insert_repo_with_metadata(db):
+    """insert_repo stores metadata fields."""
+    _seed_org(db)
+    repo = {
+        "full_name": "testorg/metarepo",
+        "repo_name": "metarepo",
+        "repo_url": "https://github.com/testorg/metarepo",
+        "language": "Python",
+        "description": "A test repo",
+        "homepage": "https://testorg.github.io/metarepo",
+    }
+    metadata = {
+        "earliest_commit_date": "2025-06-15T10:00:00Z",
+        "committer_login": "jdoe",
+        "committer_name": "Jane Doe",
+        "committer_bio": "Journalist & developer",
+    }
+    insert_repo(db, repo, org_username="testorg", is_empty=False, metadata=metadata)
+    row = db.execute("SELECT * FROM repos WHERE full_name='testorg/metarepo'").fetchone()
+    assert row["homepage_url"] == "https://testorg.github.io/metarepo"
+    assert row["earliest_commit_date"] == "2025-06-15T10:00:00Z"
+    assert row["committer_login"] == "jdoe"
+    assert row["committer_name"] == "Jane Doe"
+    assert row["committer_bio"] == "Journalist & developer"
+
+
 def test_schema_has_metadata_columns(db):
     """New metadata columns exist in the repos table."""
     row = db.execute("PRAGMA table_info(repos)").fetchall()
@@ -346,3 +372,41 @@ def test_schema_has_metadata_columns(db):
     assert "committer_name" in col_names
     assert "committer_bio" in col_names
     assert "claude_summary" in col_names
+
+
+def test_fetch_repo_metadata_basic(db):
+    """fetch_repo_metadata returns earliest commit, committer info."""
+    from unittest.mock import patch, MagicMock
+    from open_journalism_bot import fetch_repo_metadata
+
+    mock_commits_response = MagicMock()
+    mock_commits_response.status_code = 200
+    mock_commits_response.headers = {}  # no Link header = single page
+    mock_commits_response.json.return_value = [
+        {"commit": {"author": {"date": "2025-08-01T12:00:00Z"}},
+         "author": {"login": "jdoe"}},
+        {"commit": {"author": {"date": "2025-06-15T10:00:00Z"}},
+         "author": {"login": "jdoe"}},
+    ]
+
+    mock_user_response = MagicMock()
+    mock_user_response.status_code = 200
+    mock_user_response.json.return_value = {
+        "name": "Jane Doe",
+        "bio": "Journalist & developer",
+    }
+
+    def mock_get(url, **kwargs):
+        if "/commits" in url:
+            return mock_commits_response
+        if "users/jdoe" in url:
+            return mock_user_response
+        return MagicMock(status_code=404)
+
+    with patch("open_journalism_bot.requests.get", side_effect=mock_get):
+        meta = fetch_repo_metadata("testorg/myrepo", token=None)
+
+    assert meta["earliest_commit_date"] == "2025-06-15T10:00:00Z"
+    assert meta["committer_login"] == "jdoe"
+    assert meta["committer_name"] == "Jane Doe"
+    assert meta["committer_bio"] == "Journalist & developer"

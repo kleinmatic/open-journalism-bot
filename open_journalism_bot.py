@@ -94,12 +94,14 @@ def upsert_orgs(conn, orgs):
     conn.commit()
 
 
-def insert_repo(conn, repo, org_username, is_empty=False):
+def insert_repo(conn, repo, org_username, is_empty=False, metadata=None):
     """Insert a new repo into the database."""
+    meta = metadata or {}
     conn.execute(
         """INSERT OR IGNORE INTO repos
-           (full_name, org, repo_name, repo_url, language, description, is_empty, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+           (full_name, org, repo_name, repo_url, language, description, is_empty, created_at,
+            homepage_url, earliest_commit_date, committer_login, committer_name, committer_bio)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             repo["full_name"],
             org_username,
@@ -109,6 +111,11 @@ def insert_repo(conn, repo, org_username, is_empty=False):
             repo.get("description") or None,
             is_empty,
             repo.get("created_at"),
+            repo.get("homepage") or None,
+            meta.get("earliest_commit_date"),
+            meta.get("committer_login"),
+            meta.get("committer_name"),
+            meta.get("committer_bio"),
         ),
     )
     conn.commit()
@@ -378,6 +385,90 @@ def fetch_readme(full_name, token=None):
         return None
     except (requests.exceptions.RequestException, ValueError):
         return None
+
+
+def fetch_repo_metadata(full_name, token=None):
+    """
+    Fetch commit history and committer profile for a repository.
+
+    Returns a dict with:
+    - earliest_commit_date: ISO date string of the earliest commit, or None
+    - committer_login: GitHub login of the most recent committer, or None
+    - committer_name: Display name from GitHub profile, or None
+    - committer_bio: Bio from GitHub profile, or None
+
+    Never raises — catches RequestException and returns None values on failure.
+    """
+    import re
+
+    result = {
+        "earliest_commit_date": None,
+        "committer_login": None,
+        "committer_name": None,
+        "committer_bio": None,
+    }
+
+    headers = get_github_headers(token)
+    commits_url = f"https://api.github.com/repos/{full_name}/commits"
+
+    try:
+        response = requests.get(
+            commits_url,
+            headers=headers,
+            params={"per_page": 100},
+            timeout=30,
+        )
+        if response.status_code != 200:
+            logging.warning(f"{full_name}: commits API returned {response.status_code}")
+            return result
+
+        commits = response.json()
+        if not commits:
+            return result
+
+        # Get most recent committer login
+        first_commit = commits[0]
+        author = first_commit.get("author") or {}
+        login = author.get("login")
+        result["committer_login"] = login
+
+        # Determine earliest commit date
+        link_header = response.headers.get("Link", "")
+        last_page_match = re.search(r'<[^>]+[?&]page=(\d+)[^>]*>;\s*rel="last"', link_header)
+
+        if last_page_match:
+            last_page = int(last_page_match.group(1))
+            last_response = requests.get(
+                commits_url,
+                headers=headers,
+                params={"per_page": 100, "page": last_page},
+                timeout=30,
+            )
+            if last_response.status_code == 200:
+                last_commits = last_response.json()
+                if last_commits:
+                    earliest = last_commits[-1].get("commit", {}).get("author", {}).get("date")
+                    result["earliest_commit_date"] = earliest
+        else:
+            earliest = commits[-1].get("commit", {}).get("author", {}).get("date")
+            result["earliest_commit_date"] = earliest
+
+        # Fetch committer profile
+        if login:
+            user_response = requests.get(
+                f"https://api.github.com/users/{login}",
+                headers=headers,
+                timeout=30,
+            )
+            if user_response.status_code == 200:
+                user_data = user_response.json()
+                result["committer_name"] = user_data.get("name")
+                result["committer_bio"] = user_data.get("bio")
+
+    except requests.exceptions.RequestException as e:
+        logging.warning(f"{full_name}: fetch_repo_metadata failed: {e}")
+
+    return result
 
 
 def summarize_with_claude(readme_content, api_key):
