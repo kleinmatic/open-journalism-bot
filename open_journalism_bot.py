@@ -10,6 +10,7 @@ import io
 import logging
 import logging.handlers
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone, timedelta
@@ -400,8 +401,6 @@ def fetch_repo_metadata(full_name, token=None):
 
     Never raises — catches RequestException and returns None values on failure.
     """
-    import re
-
     result = {
         "earliest_commit_date": None,
         "committer_login": None,
@@ -463,8 +462,8 @@ def fetch_repo_metadata(full_name, token=None):
             )
             if user_response.status_code == 200:
                 user_data = user_response.json()
-                result["committer_name"] = user_data.get("name")
-                result["committer_bio"] = user_data.get("bio")
+                result["committer_name"] = user_data.get("name") or None
+                result["committer_bio"] = user_data.get("bio") or None
 
     except requests.exceptions.RequestException as e:
         logging.warning(f"{full_name}: fetch_repo_metadata failed: {e}")

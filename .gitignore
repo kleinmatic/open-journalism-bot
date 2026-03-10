@@ -44,6 +44,9 @@ env/
 .DS_Store
 Thumbs.db
 
+# Summaries (generated newsletter content)
+summaries/
+
 # Data (SQLite databases and WAL/journal files)
 data/*.db
 data/*.db-shm
