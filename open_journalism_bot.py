@@ -362,6 +362,7 @@ def fetch_recent_repos(github_url, token=None, minutes=15):
                 'repo_url': repo['html_url'],
                 'language': repo.get('language') or '',
                 'created_at': repo['created_at'],
+                'homepage': repo.get('homepage') or '',
             })
 
     return new_repos
@@ -830,7 +831,8 @@ def main():
                 continue
 
             empty = is_repo_empty(repo)
-            insert_repo(conn, repo, org_username=username, is_empty=empty)
+            metadata = fetch_repo_metadata(repo['full_name'], token=config['github_token'])
+            insert_repo(conn, repo, org_username=username, is_empty=empty, metadata=metadata)
 
             if empty:
                 empty_count += 1
