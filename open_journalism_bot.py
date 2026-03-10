@@ -878,6 +878,18 @@ def main():
                 new_count += 1
                 logging.info(f"{repo['full_name']}: new repo with content")
 
+            if not empty and config.get('anthropic_api_key'):
+                readme_content = fetch_readme(repo['full_name'], token=config['github_token'])
+                if readme_content:
+                    claude_summary = generate_claude_summary(readme_content, config['anthropic_api_key'])
+                    if claude_summary:
+                        conn.execute(
+                            "UPDATE repos SET claude_summary = ? WHERE full_name = ?",
+                            (claude_summary, repo['full_name']),
+                        )
+                        conn.commit()
+                        logging.info(f"{repo['full_name']}: generated claude_summary")
+
     # Phase 2: Recheck pending empty repos
     rechecked = 0
     recovered = 0
