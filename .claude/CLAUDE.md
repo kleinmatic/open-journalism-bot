@@ -61,20 +61,29 @@ tail -f logs/bot.log
 - `requests` - HTTP requests (GitHub API, CSV fetch)
 - `python-dotenv` - Environment variable loading
 
-## Current Work: Empty Repo Handling
+## Database
 
-Design approved, ready for implementation. See `docs/plans/2026-02-19-empty-repo-handling-design.md`.
+SQLite at `data/oj-bot.db` with two tables:
+- `orgs` — columns: `github_username` (PK), `org_name` (NOT NULL), `github_url` (NOT NULL)
+- `repos` — FK to `orgs.github_username` via `org` column. Key columns: `full_name` (PK), `is_empty`, `bluesky_post_url`, `bluesky_post_date`, `claude_summary`, `earliest_commit_date`, `homepage_url`, `committer_login`, `committer_name`, `committer_bio`
 
-**Summary:** Empty repos (caught mid-creation) are held back and rechecked hourly for up to 24 hours. If content appears, post with accurate description. If still empty after 24h, skip silently.
+Empty repos are held back and rechecked hourly for up to 24h. `--dry-run` is fully side-effect-free (no DB writes). `--db PATH` for testing with alternate database.
 
-**Key changes:**
-- SQLite database at `data/oj-bot.db` with `orgs` and `repos` tables
-- `--dry-run` becomes fully side-effect-free (no database writes)
-- New `--db PATH` flag for testing with alternate database
-- pytest for unit tests
+## Metadata & Summaries
+
+At discovery time (Phase 1), the bot collects repo metadata (`earliest_commit_date`, `homepage_url`, committer info) and generates a `claude_summary` from the README. The posting loop (Phase 3) is NOT modified — it uses the same description tiers as before.
+
+Backfill scripts (uncommitted utilities):
+- `backfill_metadata.py` — populate metadata/summaries for repos already in DB
+- `backfill_from_bluesky.py` — scrape bot's BlueSky history to insert pre-SQLite repos
+
+## Newsletter Summaries
+
+`/repo-summaries <date range>` skill reads from SQLite and generates summaries to `summaries/` (git-ignored). Falls back to WebFetch for repos missing `claude_summary`.
 
 ## Phase 2 TODO
 
 - [ ] GitHub Actions workflow for scheduled runs
-- [x] SQLite database for tracking posted repos (in progress — part of empty repo handling)
+- [x] SQLite database for tracking posted repos
+- [x] Repo metadata and Claude summaries at discovery time
 - [ ] Thumbnail images in link cards (requires fetching OpenGraph images)

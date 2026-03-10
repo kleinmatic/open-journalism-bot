@@ -47,6 +47,9 @@ Thumbs.db
 # Summaries (generated newsletter content)
 summaries/
 
+# Backfill scripts (one-time utilities)
+backfill_*.py
+
 # Data (SQLite databases and WAL/journal files)
 data/*.db
 data/*.db-shm
