@@ -23,6 +23,8 @@ uv run open_journalism_bot.py
 
 **Note:** If `TEST_MODE=false` in `.env`, the bot will post to BlueSky. Always use `--dry-run` when testing to avoid accidental posts.
 
+**IMPORTANT:** When running from this REPL, ALWAYS run with `--dry-run` first. Show the user what would be posted and get explicit approval before running without `--dry-run`.
+
 ## Security
 
 - NEVER commit `.env` (contains API credentials)

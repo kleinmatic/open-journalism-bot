@@ -22,10 +22,20 @@ import requests
 from atproto import Client, models
 from dotenv import load_dotenv
 
+# Orgs with many repos that need deeper fetching to catch newly-public repos.
+# Default per_page is 10; whales get 100.
+WHALE_ORGS = {
+    'guardian', 'financial-times', 'seattletimes', 'bbc-data-unit',
+    'the-pudding', 'globocom', 'ft-interactive', 'sunlightlabs',
+    'striblab', 'abcnews', 'nprapps', 'texty', 'sfchronicle',
+    'datamade', 'datadesk', 'minnpost', 'texastribune', 'zeitonline',
+    'openelections', 'bloomberg',
+}
 
-def init_db(db_path):
+
+def init_db(db_path, _conn=None):
     """Initialize SQLite database and return connection."""
-    conn = sqlite3.connect(db_path)
+    conn = _conn or sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -54,7 +64,9 @@ def init_db(db_path):
             committer_login       TEXT,
             committer_name        TEXT,
             committer_bio         TEXT,
-            claude_summary        TEXT
+            claude_summary        TEXT,
+            license               TEXT,
+            backfill_source       TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_repos_status
@@ -69,6 +81,8 @@ def init_db(db_path):
         ("committer_name", "TEXT"),
         ("committer_bio", "TEXT"),
         ("claude_summary", "TEXT"),
+        ("license", "TEXT"),
+        ("backfill_source", "TEXT"),
     ]
     for col_name, col_type in new_columns:
         try:
@@ -101,8 +115,8 @@ def insert_repo(conn, repo, org_username, is_empty=False, metadata=None):
     conn.execute(
         """INSERT OR IGNORE INTO repos
            (full_name, org, repo_name, repo_url, language, description, is_empty, created_at,
-            homepage_url, earliest_commit_date, committer_login, committer_name, committer_bio)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            homepage_url, license, earliest_commit_date, committer_login, committer_name, committer_bio)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             repo["full_name"],
             org_username,
@@ -113,6 +127,7 @@ def insert_repo(conn, repo, org_username, is_empty=False, metadata=None):
             is_empty,
             repo.get("created_at"),
             repo.get("homepage") or None,
+            repo.get("license"),
             meta.get("earliest_commit_date"),
             meta.get("committer_login"),
             meta.get("committer_name"),
@@ -135,7 +150,8 @@ def get_ready_repos(conn):
     return conn.execute(
         """SELECT r.*, o.org_name FROM repos r
            JOIN orgs o ON r.org = o.github_username
-           WHERE r.is_empty = 0 AND r.bluesky_post_url IS NULL"""
+           WHERE r.is_empty = 0 AND r.bluesky_post_url IS NULL
+                 AND r.backfill_source IS NULL"""
     ).fetchall()
 
 
@@ -298,10 +314,11 @@ class RateLimitError(Exception):
         super().__init__(f"Rate limit exceeded. Resets at {reset_time}")
 
 
-def fetch_recent_repos(github_url, token=None, minutes=15):
+def fetch_latest_repos(github_url, token=None, per_page=10):
     """
-    Fetch repos created within the last N minutes.
-    Returns list of repo dicts with name, description, url, language.
+    Fetch the most recently created public repos for an org/user.
+    Returns list of repo dicts. Does NOT filter by time — caller
+    checks against the database for newness.
     Raises RateLimitError if rate limited.
     """
     username = extract_github_username(github_url)
@@ -319,7 +336,7 @@ def fetch_recent_repos(github_url, token=None, minutes=15):
             response = requests.get(
                 api_url,
                 headers=headers,
-                params={'sort': 'created', 'direction': 'desc', 'per_page': 10},
+                params={'sort': 'created', 'direction': 'desc', 'per_page': per_page},
                 timeout=30,
             )
             if response.status_code == 200:
@@ -344,29 +361,25 @@ def fetch_recent_repos(github_url, token=None, minutes=15):
         logging.warning(f"Could not fetch repos for {username}")
         return []
 
-    # Filter to repos created within the time window
-    cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=minutes)
-    new_repos = []
-
+    result = []
     for repo in repos_data:
         # Skip forks - we only want original repos
         if repo.get('fork', False):
             continue
 
-        created_at = datetime.fromisoformat(repo['created_at'].replace('Z', '+00:00'))
+        license_info = repo.get('license')
+        result.append({
+            'repo_name': repo['name'],
+            'full_name': repo['full_name'],
+            'description': repo.get('description') or '',
+            'repo_url': repo['html_url'],
+            'language': repo.get('language') or '',
+            'created_at': repo['created_at'],
+            'homepage': repo.get('homepage') or '',
+            'license': license_info.get('name') if license_info else None,
+        })
 
-        if created_at >= cutoff_time:
-            new_repos.append({
-                'repo_name': repo['name'],
-                'full_name': repo['full_name'],
-                'description': repo.get('description') or '',
-                'repo_url': repo['html_url'],
-                'language': repo.get('language') or '',
-                'created_at': repo['created_at'],
-                'homepage': repo.get('homepage') or '',
-            })
-
-    return new_repos
+    return result
 
 
 def fetch_readme(full_name, token=None):
@@ -779,14 +792,17 @@ def main():
 
     if dry_run:
         # Dry run: use in-memory DB seeded from disk if it exists
-        conn = init_db(":memory:")
         disk_db = Path(db_path)
         if disk_db.exists():
             disk_conn = sqlite3.connect(str(disk_db))
+            conn = init_db(":memory:")
             disk_conn.backup(conn)
             disk_conn.close()
+            # Re-run init_db to apply migrations the disk DB may be missing
+            conn = init_db(":memory:", _conn=conn)
             logging.info(f"Dry run: loaded snapshot from {db_path}")
         else:
+            conn = init_db(":memory:")
             logging.info("Dry run: using fresh in-memory database")
     else:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -826,7 +842,7 @@ def main():
     # In dry-run mode the DB is in-memory, so writes are side-effect-free
     upsert_orgs(conn, orgs)
 
-    logging.info(f"Checking {len(orgs)} organizations for repos created in last {config['check_minutes']} minutes...")
+    logging.info(f"Checking {len(orgs)} organizations for new repos...")
 
     if not config['github_token']:
         logging.warning("No GITHUB_TOKEN set. Rate limited to 60 requests/hour.")
@@ -851,11 +867,12 @@ def main():
 
     for org in orgs:
         username = extract_github_username(org['github_url'])
+        per_page = 100 if username.lower() in WHALE_ORGS else 10
         try:
-            repos = fetch_recent_repos(
+            repos = fetch_latest_repos(
                 org['github_url'],
                 token=config['github_token'],
-                minutes=config['check_minutes'],
+                per_page=per_page,
             )
             orgs_checked += 1
         except RateLimitError as e:
@@ -865,6 +882,14 @@ def main():
         for repo in repos:
             if repo_exists(conn, repo['full_name']):
                 continue
+
+            # Detect likely private-to-public repos
+            created_at = datetime.fromisoformat(repo['created_at'].replace('Z', '+00:00'))
+            age_hours = (datetime.now(timezone.utc) - created_at).total_seconds() / 3600
+            if age_hours > 24:
+                logging.warning(
+                    f"{repo['full_name']}: created {created_at.strftime('%Y-%m-%d')} but not previously seen — likely made public recently"
+                )
 
             empty = is_repo_empty(repo)
             metadata = fetch_repo_metadata(repo['full_name'], token=config['github_token'])
