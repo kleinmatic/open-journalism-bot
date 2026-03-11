@@ -244,6 +244,9 @@ def load_config():
         'bluesky_password': os.getenv('BLUESKY_APP_PASSWORD'),
         'check_minutes': int(os.getenv('CHECK_MINUTES', '15')),
         'test_mode': os.getenv('TEST_MODE', 'true').lower() == 'true',
+        'alert_ha_url': os.getenv('ALERT_HA_URL'),
+        'alert_ha_token': os.getenv('ALERT_HA_TOKEN'),
+        'alert_ha_notify_service': os.getenv('ALERT_HA_NOTIFY_SERVICE'),
     }
 
     if not config['csv_url']:
@@ -254,6 +257,24 @@ def load_config():
             raise ValueError("BLUESKY_HANDLE and BLUESKY_APP_PASSWORD are required when TEST_MODE is false")
 
     return config
+
+
+def send_alert(config, message):
+    """Send a developer alert via Home Assistant. Fails silently."""
+    ha_url = config.get('alert_ha_url')
+    ha_token = config.get('alert_ha_token')
+    ha_service = config.get('alert_ha_notify_service')
+    if not (ha_url and ha_token and ha_service):
+        return
+    try:
+        requests.post(
+            f"{ha_url}/api/services/notify/{ha_service}",
+            headers={'Authorization': f"Bearer {ha_token}"},
+            json={'message': message},
+            timeout=10,
+        )
+    except Exception as e:
+        logging.warning(f"Alert failed: {e}")
 
 
 def fetch_csv(url):
@@ -877,6 +898,7 @@ def main():
             orgs_checked += 1
         except RateLimitError as e:
             logging.error(f"Rate limit hit after {orgs_checked} orgs: {e}")
+            send_alert(config, f"⚠️ OJ Bot: Rate limit hit after {orgs_checked} orgs")
             break
 
         for repo in repos:
@@ -890,6 +912,7 @@ def main():
                 logging.warning(
                     f"{repo['full_name']}: created {created_at.strftime('%Y-%m-%d')} but not previously seen — likely made public recently"
                 )
+                send_alert(config, f"📦 OJ Bot: {repo['full_name']} created {created_at.strftime('%Y-%m-%d')} but just appeared — likely made public recently")
 
             empty = is_repo_empty(repo)
             metadata = fetch_repo_metadata(repo['full_name'], token=config['github_token'])
