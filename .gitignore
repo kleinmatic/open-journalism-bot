@@ -50,8 +50,7 @@ summaries/
 # Backfill scripts (one-time utilities)
 backfill_*.py
 
-# Data (SQLite databases and WAL/journal files)
+# Data (SQLite databases, backups, and WAL/journal files)
 data/*.db
-data/*.db-shm
-data/*.db-wal
-data/*.db-journal
+data/*.db-*
+org-repos.csv

@@ -15,7 +15,7 @@ uv sync
 uv run open_journalism_bot.py --limit 10 --dry-run
 
 # Test single org (--dry-run prevents actual posting)
-uv run open_journalism_bot.py --org striblab --minutes 1440 --dry-run
+uv run open_journalism_bot.py --org striblab --dry-run
 
 # Run for real (requires TEST_MODE=false in .env)
 uv run open_journalism_bot.py
@@ -27,7 +27,7 @@ uv run open_journalism_bot.py
 
 ## Security
 
-- NEVER commit `.env` (contains API credentials)
+- NEVER commit `.env` (contains API credentials, HA token)
 - `.env.example` has safe placeholder values
 - GitHub token only needs "Public Repositories (read-only)" access
 - Anthropic API key is optional but enables AI-generated descriptions
@@ -37,15 +37,29 @@ uv run open_journalism_bot.py
 - `open_journalism_bot.py` - main script, all logic in one file
 - `templates/post.mustache` - BlueSky post template (Mustache format)
 - `logs/bot.log` - rotating log file (5MB, 3 backups)
-- Uses time-based detection: checks repos created within CHECK_MINUTES window
 - Link cards are embedded using `atproto` models
 - Description tiers: GitHub description (in card) → Claude README summary → language fallback → "empty repo" (imputed descriptions go in post body, not card)
+
+### Repo Detection
+
+Uses **DB-based detection**: fetches the most recently created repos per org from the GitHub API and compares against the `repos` table. Any repo not already in the DB is treated as new. This catches both newly created repos and private repos that were recently made public.
+
+- `fetch_latest_repos()` fetches top N repos per org (no time-window filtering)
+- **Whale orgs** (defined in `WHALE_ORGS` set): fetch 100 repos instead of 10, since prolific orgs may have many new repos
+- Repos with `created_at` older than 24h trigger a WARNING log and a push notification (likely private-to-public)
+- The `backfill_source` column prevents backfilled repos from ever being posted to BlueSky
+
+### Developer Alerts
+
+Push notifications via Home Assistant companion app. Configured via `ALERT_HA_*` env vars. Alerts fire on:
+- Likely private-to-public repo discoveries (created_at > 24h old)
+- GitHub API rate limit hits
 
 ## Debugging
 
 ```bash
-# Debug with verbose logging and large time window to find historical repos
-uv run open_journalism_bot.py --org <org> --minutes 10000000 --dry-run --verbose
+# Debug with verbose logging
+uv run open_journalism_bot.py --org <org> --dry-run --verbose
 
 # Check logs
 tail -f logs/bot.log
@@ -62,22 +76,30 @@ tail -f logs/bot.log
 - `anthropic` - Claude API for README summarization
 - `atproto` - BlueSky API client
 - `chevron` - Mustache templating
-- `requests` - HTTP requests (GitHub API, CSV fetch)
+- `requests` - HTTP requests (GitHub API, CSV fetch, HA alerts)
 - `python-dotenv` - Environment variable loading
 
 ## Database
 
 SQLite at `data/oj-bot.db` with two tables:
 - `orgs` — columns: `github_username` (PK), `org_name` (NOT NULL), `github_url` (NOT NULL)
-- `repos` — FK to `orgs.github_username` via `org` column. Key columns: `full_name` (PK), `is_empty`, `bluesky_post_url`, `bluesky_post_date`, `claude_summary`, `earliest_commit_date`, `homepage_url`, `committer_login`, `committer_name`, `committer_bio`
+- `repos` — FK to `orgs.github_username` via `org` column. Key columns: `full_name` (PK), `is_empty`, `bluesky_post_url`, `bluesky_post_date`, `claude_summary`, `earliest_commit_date`, `homepage_url`, `committer_login`, `committer_name`, `committer_bio`, `license`, `backfill_source`
+
+**Important columns:**
+- `backfill_source` — TEXT, nullable. NULL = organically discovered (eligible for posting). Non-NULL = backfilled from a data source (e.g. `"org-repos.csv 2026-03-11"`, `"github-api 2026-03-11"`). Repos with non-NULL `backfill_source` are NEVER posted to BlueSky.
+- `license` — repo license from GitHub API
 
 Empty repos are held back and rechecked hourly for up to 24h. `--dry-run` is fully side-effect-free (no DB writes). `--db PATH` for testing with alternate database.
 
+**The database is important** — it contains ~15k repos as the baseline for detecting new repos. Handle with care. Backups are in `data/`.
+
 ## Metadata & Summaries
 
-At discovery time (Phase 1), the bot collects repo metadata (`earliest_commit_date`, `homepage_url`, committer info) and generates a `claude_summary` from the README. The posting loop (Phase 3) is NOT modified — it uses the same description tiers as before.
+At discovery time (Phase 1), the bot collects repo metadata (`earliest_commit_date`, `homepage_url`, committer info, `license`) and generates a `claude_summary` from the README. The posting loop (Phase 3) is NOT modified — it uses the same description tiers as before.
 
-Backfill scripts (uncommitted utilities):
+Backfill scripts (gitignored one-time utilities):
+- `backfill_known_repos.py` — import repos from `org-repos.csv` into DB (case-insensitive org matching)
+- `backfill_from_github.py` — fetch all repos from GitHub API for every org, backfill missing ones
 - `backfill_metadata.py` — populate metadata/summaries for repos already in DB
 - `backfill_from_bluesky.py` — scrape bot's BlueSky history to insert pre-SQLite repos
 
@@ -85,9 +107,11 @@ Backfill scripts (uncommitted utilities):
 
 `/repo-summaries <date range>` skill reads from SQLite and generates summaries to `summaries/` (git-ignored). Falls back to WebFetch for repos missing `claude_summary`. Also includes a "most active orgs" top 10 by public commit count via Search Commits API.
 
-## Phase 2 TODO
+## TODO
 
 - [ ] GitHub Actions workflow for scheduled runs
 - [x] SQLite database for tracking posted repos
 - [x] Repo metadata and Claude summaries at discovery time
+- [x] DB-based repo detection (replaces time-window filtering)
+- [x] Developer alerts via Home Assistant
 - [ ] Thumbnail images in link cards (requires fetching OpenGraph images)
