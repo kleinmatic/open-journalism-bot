@@ -115,3 +115,4 @@ Backfill scripts (gitignored one-time utilities):
 - [x] DB-based repo detection (replaces time-window filtering)
 - [x] Developer alerts via Home Assistant
 - [ ] Thumbnail images in link cards (requires fetching OpenGraph images)
+- [ ] Per-org special handling rules (e.g. The Pudding: detect starter template clones, treat as empty and recheck in 24h instead of posting boilerplate description)
