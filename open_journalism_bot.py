@@ -370,6 +370,12 @@ def fetch_latest_repos(github_url, token=None, per_page=10):
                     reset_ts = int(response.headers.get('X-RateLimit-Reset', 0))
                     reset_time = datetime.fromtimestamp(reset_ts, tz=timezone.utc)
                     raise RateLimitError(reset_time)
+                # Log the reason for the 403 (e.g. org token lifetime policy)
+                try:
+                    reason = response.json().get('message', 'unknown')
+                    logging.debug(f"403 for {username}: {reason}")
+                except ValueError:
+                    pass
                 continue
             elif response.status_code == 404:
                 continue
@@ -377,6 +383,25 @@ def fetch_latest_repos(github_url, token=None, per_page=10):
                 response.raise_for_status()
         except requests.exceptions.HTTPError:
             continue
+
+    # If authenticated requests all failed with 403, retry without auth
+    # (fine-grained PATs may lack access to specific orgs)
+    if repos_data is None and token:
+        unauthenticated_headers = get_github_headers(token=None)
+        for api_url in urls_to_try:
+            try:
+                response = requests.get(
+                    api_url,
+                    headers=unauthenticated_headers,
+                    params={'sort': 'created', 'direction': 'desc', 'per_page': per_page},
+                    timeout=30,
+                )
+                if response.status_code == 200:
+                    repos_data = response.json()
+                    logging.warning(f"Fetched {username} repos without auth (token denied by org policy)")
+                    break
+            except requests.exceptions.RequestException:
+                continue
 
     if repos_data is None:
         logging.warning(f"Could not fetch repos for {username}")
