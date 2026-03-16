@@ -29,12 +29,18 @@ ERROR_RE = re.compile(
 TIMESTAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 
 
+CHECKING_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) INFO: Checking \d+ organizations for"
+)
+
+
 def parse_log(log_path, cutoff):
     """Parse log file and return list of check results after cutoff."""
     checks = []
     # Track warnings/errors between "Done" lines
     current_warnings = []
     current_errors = []
+    run_start = None
 
     for line in open(log_path):
         line = line.rstrip()
@@ -47,9 +53,15 @@ def parse_log(log_path, cutoff):
                 if ts < cutoff:
                     current_warnings.clear()
                     current_errors.clear()
+                    run_start = None
                     continue
             except ValueError:
                 continue
+
+        # Track run start time
+        cm = CHECKING_RE.match(line)
+        if cm:
+            run_start = datetime.strptime(cm.group(1), "%Y-%m-%d %H:%M:%S")
 
         # Collect warnings (skip noisy ones)
         wm = WARNING_RE.match(line)
@@ -67,91 +79,108 @@ def parse_log(log_path, cutoff):
         # Try new format first
         m = NEW_DONE_RE.match(line)
         if m:
+            done_time = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+            duration = (done_time - run_start).total_seconds() if run_start else None
             checks.append({
-                "time": datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"),
+                "time": done_time,
                 "orgs": int(m.group(2)),
                 "new": int(m.group(3)),
                 "empty": int(m.group(4)),
                 "rechecked": int(m.group(5)),
                 "recovered": int(m.group(6)),
                 "posted": int(m.group(7)),
+                "duration": duration,
                 "warnings": current_warnings[:],
                 "errors": current_errors[:],
             })
             current_warnings.clear()
             current_errors.clear()
+            run_start = None
             continue
 
         # Try old format
         m = OLD_DONE_RE.match(line)
         if m:
+            done_time = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+            duration = (done_time - run_start).total_seconds() if run_start else None
             checks.append({
-                "time": datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"),
+                "time": done_time,
                 "orgs": int(m.group(2)),
                 "new": int(m.group(3)),
                 "empty": 0,
                 "rechecked": 0,
                 "recovered": 0,
                 "posted": int(m.group(3)),  # old format posted everything found
+                "duration": duration,
                 "warnings": current_warnings[:],
                 "errors": current_errors[:],
             })
             current_warnings.clear()
             current_errors.clear()
+            run_start = None
             continue
 
     return checks
 
 
 def print_report(checks, hours):
-    print(f"\n  Bot Check Report — last {hours}h ({len(checks)} runs)")
-    print(f"  {'=' * 72}")
+    print(f"\nBot Check Report — last {hours}h ({len(checks)} runs)")
+    print("=" * 46)
 
     if not checks:
-        print("  No checks found in this time range.")
+        print("No checks found in this time range.")
         return
 
     # Table header
-    print(f"  {'Time':>19}  {'Orgs':>5}  {'New':>4}  {'Empty':>5}  {'Rechk':>5}  {'Recov':>5}  {'Posted':>6}  Notes")
-    print(f"  {'-' * 19}  {'-' * 5}  {'-' * 4}  {'-' * 5}  {'-' * 5}  {'-' * 5}  {'-' * 6}  {'-' * 20}")
+    hdr = f"{'Time':>16} {'Dur':>5} {'Orgs':>4} {'New':>3} {'Empty':>5} {'Rechk':>5} {'Recov':>5} {'Posted':>6}"
+    print(hdr)
+    print("-" * len(hdr))
 
     total_new = 0
     total_posted = 0
     total_empty = 0
     total_rechecked = 0
     total_recovered = 0
+    notes_out = []
 
-    for c in checks:
+    for i, c in enumerate(checks, 1):
         total_new += c["new"]
         total_posted += c["posted"]
         total_empty += c["empty"]
         total_rechecked += c["rechecked"]
         total_recovered += c["recovered"]
 
-        notes = []
-        if c["errors"]:
-            notes.append(f"ERR: {c['errors'][0][:40]}")
-        if c["warnings"]:
-            notes.append(f"{len(c['warnings'])} warn")
-
-        time_str = c["time"].strftime("%Y-%m-%d %H:%M:%S")
-        note_str = ", ".join(notes)
-
         # Highlight rows with activity
         marker = "*" if (c["new"] or c["posted"] or c["errors"]) else " "
+        time_str = c["time"].strftime("%b %d %H:%M:%S")
+
+        if c["duration"] is not None:
+            mins, secs = divmod(int(c["duration"]), 60)
+            dur_str = f"{mins}:{secs:02d}"
+        else:
+            dur_str = "-"
 
         print(
-            f"{marker} {time_str:>19}  {c['orgs']:>5}  {c['new']:>4}  "
-            f"{c['empty']:>5}  {c['rechecked']:>5}  {c['recovered']:>5}  "
-            f"{c['posted']:>6}  {note_str}"
+            f"{marker}{time_str:>16} {dur_str:>5} {c['orgs']:>4} {c['new']:>3} "
+            f"{c['empty']:>5} {c['rechecked']:>5} {c['recovered']:>5} {c['posted']:>6}"
         )
 
-    print(f"  {'-' * 19}  {'-' * 5}  {'-' * 4}  {'-' * 5}  {'-' * 5}  {'-' * 5}  {'-' * 6}")
-    print(
-        f"  {'TOTAL':>19}  {'':>5}  {total_new:>4}  "
-        f"{total_empty:>5}  {total_rechecked:>5}  {total_recovered:>5}  "
-        f"{total_posted:>6}"
-    )
+        # Collect notes to print at the end
+        if c["errors"]:
+            for e in c["errors"]:
+                notes_out.append(f"  {c['time'].strftime('%H:%M')} ERR: {e}")
+        if c["warnings"]:
+            for w in c["warnings"]:
+                notes_out.append(f"  {c['time'].strftime('%H:%M')} WARN: {w}")
+
+    print("-" * len(hdr))
+    print(f"{'TOTAL':>16} {'':>5} {'':>4} {total_new:>3} {total_empty:>5} {total_rechecked:>5} {total_recovered:>5} {total_posted:>6}")
+
+    if notes_out:
+        print(f"\nNotes:")
+        for n in notes_out:
+            print(n)
+
     print()
 
 
