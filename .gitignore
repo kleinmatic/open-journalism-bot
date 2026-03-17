@@ -48,8 +48,9 @@ Thumbs.db
 # Summaries (generated newsletter content)
 summaries/
 
-# Backfill scripts (one-time utilities)
+# Backfill scripts (one-time utilities, except the permanent new-org backfiller)
 backfill_*.py
+!backfill_new_orgs.py
 
 # Data (SQLite databases, backups, and WAL/journal files)
 data/*.db
