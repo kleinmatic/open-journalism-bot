@@ -95,9 +95,21 @@ def init_db(db_path, _conn=None):
 
 
 def upsert_orgs(conn, orgs):
-    """Insert or update orgs from the CSV org list."""
+    """Insert or update orgs from the CSV org list.
+
+    Returns a set of github_usernames that were newly inserted (not previously
+    in the database).  The caller uses this to seed existing repos for new orgs
+    instead of treating them as brand-new discoveries.
+    """
+    existing = {
+        row[0]
+        for row in conn.execute("SELECT github_username FROM orgs").fetchall()
+    }
+    new_orgs = set()
     for org in orgs:
         username = extract_github_username(org["github_url"])
+        if username not in existing:
+            new_orgs.add(username)
         conn.execute(
             """INSERT INTO orgs (github_username, org_name, github_url)
                VALUES (?, ?, ?)
@@ -107,6 +119,7 @@ def upsert_orgs(conn, orgs):
             (username, org["org_name"], org["github_url"]),
         )
     conn.commit()
+    return new_orgs
 
 
 def insert_repo(conn, repo, org_username, is_empty=False, metadata=None):
@@ -886,7 +899,9 @@ def main():
             logging.info(f"Limited to first {args.limit} organizations")
 
     # In dry-run mode the DB is in-memory, so writes are side-effect-free
-    upsert_orgs(conn, orgs)
+    new_orgs = upsert_orgs(conn, orgs)
+    if new_orgs:
+        logging.info(f"New orgs added: {', '.join(sorted(new_orgs))} — their existing repos will be seeded, not posted")
 
     logging.info(f"Checking {len(orgs)} organizations for new repos...")
 
@@ -926,8 +941,25 @@ def main():
             send_alert(config, f"⚠️ OJ Bot: Rate limit hit after {orgs_checked} orgs")
             break
 
+        is_new_org = username in new_orgs
+
         for repo in repos:
             if repo_exists(conn, repo['full_name']):
+                continue
+
+            # Seed existing repos for newly-added orgs — mark them as
+            # backfilled so they won't be posted to BlueSky.  Only repos
+            # discovered on *future* runs (after the seed) get posted.
+            if is_new_org:
+                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                metadata = fetch_repo_metadata(repo['full_name'], token=config['github_token'])
+                insert_repo(conn, repo, org_username=username, is_empty=False, metadata=metadata)
+                conn.execute(
+                    "UPDATE repos SET backfill_source = ? WHERE full_name = ?",
+                    (f"org-seed {today}", repo['full_name']),
+                )
+                conn.commit()
+                logging.info(f"{repo['full_name']}: seeded (new org, not posting)")
                 continue
 
             # Detect likely private-to-public repos

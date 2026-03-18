@@ -35,6 +35,7 @@ def test_init_db_repos_schema(db):
         "first_seen", "bluesky_post_url", "bluesky_post_date",
         "earliest_commit_date", "homepage_url", "committer_login",
         "committer_name", "committer_bio", "claude_summary",
+        "license", "backfill_source",
     }
     assert columns == expected
 
@@ -46,26 +47,38 @@ def test_init_db_idempotent(db):
 
 
 def test_upsert_orgs_inserts(db):
-    """upsert_orgs should insert new orgs."""
+    """upsert_orgs should insert new orgs and return their usernames."""
     orgs = [
         {"org_name": "New York Times", "github_url": "https://github.com/nytimes"},
         {"org_name": "ProPublica", "github_url": "https://github.com/propublica"},
     ]
-    upsert_orgs(db, orgs)
+    new_orgs = upsert_orgs(db, orgs)
     rows = db.execute("SELECT * FROM orgs ORDER BY github_username").fetchall()
     assert len(rows) == 2
     assert rows[0]["github_username"] == "nytimes"
     assert rows[0]["org_name"] == "New York Times"
+    assert new_orgs == {"nytimes", "propublica"}
 
 
 def test_upsert_orgs_updates_name(db):
-    """upsert_orgs should update org_name if it changes."""
+    """upsert_orgs should update org_name if it changes, returning no new orgs."""
     orgs = [{"org_name": "NYT", "github_url": "https://github.com/nytimes"}]
     upsert_orgs(db, orgs)
     orgs = [{"org_name": "New York Times", "github_url": "https://github.com/nytimes"}]
-    upsert_orgs(db, orgs)
+    new_orgs = upsert_orgs(db, orgs)
     row = db.execute("SELECT * FROM orgs WHERE github_username='nytimes'").fetchone()
     assert row["org_name"] == "New York Times"
+    assert new_orgs == set()
+
+
+def test_upsert_orgs_mixed_new_and_existing(db):
+    """upsert_orgs should only return genuinely new orgs."""
+    upsert_orgs(db, [{"org_name": "NYT", "github_url": "https://github.com/nytimes"}])
+    new_orgs = upsert_orgs(db, [
+        {"org_name": "New York Times", "github_url": "https://github.com/nytimes"},
+        {"org_name": "ProPublica", "github_url": "https://github.com/propublica"},
+    ])
+    assert new_orgs == {"propublica"}
 
 
 def _seed_org(db):
@@ -128,6 +141,25 @@ def test_get_ready_repos_excludes_posted(db):
     insert_repo(db, repo, org_username="testorg", is_empty=False)
     db.execute(
         "UPDATE repos SET bluesky_post_url='https://bsky.app/post/123' WHERE full_name='testorg/posted'"
+    )
+    db.commit()
+    ready = get_ready_repos(db)
+    assert len(ready) == 0
+
+
+def test_get_ready_repos_excludes_seeded(db):
+    """Repos seeded when a new org is added should not be ready to post."""
+    _seed_org(db)
+    repo = {
+        "full_name": "testorg/seeded",
+        "repo_name": "seeded",
+        "repo_url": "https://github.com/testorg/seeded",
+        "language": "Python",
+        "description": "Existing repo from new org",
+    }
+    insert_repo(db, repo, org_username="testorg", is_empty=False)
+    db.execute(
+        "UPDATE repos SET backfill_source = 'org-seed 2026-03-18' WHERE full_name='testorg/seeded'"
     )
     db.commit()
     ready = get_ready_repos(db)
