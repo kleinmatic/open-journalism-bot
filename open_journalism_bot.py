@@ -691,7 +691,7 @@ def get_repo_descriptions(repo, token=None, anthropic_api_key=None):
             summary = summarize_with_claude(readme_content, anthropic_api_key)
             if summary:
                 logging.info(f"{repo_name}: Claude summary: {summary}")
-                return {'github_description': '', 'imputed_description': f"I think this is {summary}"}
+                return {'github_description': '', 'imputed_description': f"This has no description, but I think this is {summary}"}
             else:
                 logging.info(f"{repo_name}: Claude returned no summary (BOILERPLATE/INAPPROPRIATE or error)")
         else:
@@ -704,12 +704,12 @@ def get_repo_descriptions(repo, token=None, anthropic_api_key=None):
         logging.info(f"{repo_name}: Using language fallback ({repo['language']})")
         return {
             'github_description': '',
-            'imputed_description': f"I don't know what this does but it uses {repo['language']}.",
+            'imputed_description': f"This has no description. I don't know what this does, but it uses {repo['language']}.",
         }
 
     # Completely empty repo
     logging.info(f"{repo_name}: No description, no README, no language - empty repo")
-    return {'github_description': '', 'imputed_description': "I think this is an empty repo."}
+    return {'github_description': '', 'imputed_description': "This has no description and appears to be an empty repo."}
 
 
 def load_template():
