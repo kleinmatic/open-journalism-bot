@@ -22,6 +22,8 @@ import requests
 from atproto import Client, models
 from dotenv import load_dotenv
 
+from ai_signals import enrich_ai_signals
+
 # Orgs with many repos that need deeper fetching to catch newly-public repos.
 # Default per_page is 10; whales get 100.
 WHALE_ORGS = {
@@ -66,7 +68,9 @@ def init_db(db_path, _conn=None):
             committer_bio         TEXT,
             claude_summary        TEXT,
             license               TEXT,
-            backfill_source       TEXT
+            backfill_source       TEXT,
+            ai_signals_json       TEXT,
+            ai_signals_checked_at TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_repos_status
@@ -83,6 +87,8 @@ def init_db(db_path, _conn=None):
         ("claude_summary", "TEXT"),
         ("license", "TEXT"),
         ("backfill_source", "TEXT"),
+        ("ai_signals_json", "TEXT"),
+        ("ai_signals_checked_at", "TIMESTAMP"),
     ]
     for col_name, col_type in new_columns:
         try:
@@ -243,6 +249,29 @@ def recheck_empty_repo(conn, full_name, token=None):
 def is_repo_empty(repo):
     """Determine if a repo appears to be empty (no description, no language)."""
     return not repo.get("description") and not repo.get("language")
+
+
+def scan_and_store_ai_signals(conn, full_name, token=None):
+    """Scan a repo for AI-coding artifacts and store the result on the row.
+
+    Always sets ai_signals_checked_at; sets ai_signals_json to the JSON-encoded
+    result when the scan returned anything. Never raises — logs and returns.
+    """
+    import json
+    try:
+        signals = enrich_ai_signals(full_name, token=token)
+    except Exception as e:  # noqa: BLE001
+        logging.warning(f"{full_name}: enrich_ai_signals raised {type(e).__name__}: {e}")
+        return
+    payload = json.dumps(signals) if signals is not None else None
+    conn.execute(
+        "UPDATE repos SET ai_signals_json = ?, "
+        "ai_signals_checked_at = datetime('now') WHERE full_name = ?",
+        (payload, full_name),
+    )
+    conn.commit()
+    if signals and not signals.get("unreachable") and not signals.get("fork"):
+        logging.info(f"{full_name}: scanned ai_signals")
 
 
 def load_config():
@@ -994,6 +1023,9 @@ def main():
                         conn.commit()
                         logging.info(f"{repo['full_name']}: generated claude_summary")
 
+            if not empty:
+                scan_and_store_ai_signals(conn, repo['full_name'], token=config['github_token'])
+
     # Phase 2: Recheck pending empty repos
     rechecked = 0
     recovered = 0
@@ -1007,6 +1039,7 @@ def main():
         rechecked += 1
         if changed:
             recovered += 1
+            scan_and_store_ai_signals(conn, row['full_name'], token=config['github_token'])
 
     # Phase 3: Post ready repos
     posted = 0

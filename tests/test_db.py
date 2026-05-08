@@ -36,6 +36,7 @@ def test_init_db_repos_schema(db):
         "earliest_commit_date", "homepage_url", "committer_login",
         "committer_name", "committer_bio", "claude_summary",
         "license", "backfill_source",
+        "ai_signals_json", "ai_signals_checked_at",
     }
     assert columns == expected
 
