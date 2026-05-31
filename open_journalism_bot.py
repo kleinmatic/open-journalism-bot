@@ -165,12 +165,20 @@ def repo_exists(conn, full_name):
 
 
 def get_ready_repos(conn):
-    """Get repos that are ready to post (not empty, not yet posted)."""
+    """Get repos that are ready to post (not empty, not yet posted).
+
+    The Pudding (`the-pudding`) is excluded outright: they open public repos
+    months before a story publishes, so auto-posting a repo-opening would scoop
+    the story. Their repos still land in the DB at discovery and enter the
+    biweekly digest manually, once the story is confirmed live on pudding.cool
+    (see the no-scoop policy in CLAUDE.md).
+    """
     return conn.execute(
         """SELECT r.*, o.org_name FROM repos r
            JOIN orgs o ON r.org = o.github_username
            WHERE r.is_empty = 0 AND r.bluesky_post_url IS NULL
-                 AND r.backfill_source IS NULL"""
+                 AND r.backfill_source IS NULL
+                 AND r.org != 'the-pudding'"""
     ).fetchall()
 
 

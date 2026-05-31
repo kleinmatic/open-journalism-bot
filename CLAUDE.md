@@ -28,6 +28,20 @@ For biweekly post drafting, the local-only `ai_signals.py` scanner (laptop-side,
 - Discovery pipeline runs `enrich_ai_signals()` on every newly-discovered non-empty repo and after a successful empty-repo recheck — this is the module that lives in this repo (uses `requests`, no `gh` CLI required)
 - Bot logs live at `logs/bot.log` on the host; a nightly summary is emailed via the host's MTA
 
+## No-scoop policy: do not post unpublished stories
+
+The bot exists to celebrate open-work culture, **not** to scoop journalists with their own code. Never post a repo that may back an unpublished story. The clearest, most frequent offender is The Pudding.
+
+### The Pudding (`the-pudding`) — hold scaffolding for unpublished stories
+
+The Pudding routinely creates **public** GitHub repos months before a story publishes. Auto-posting these announces an in-progress story before its authors do — a no-scoop violation — even when the repo's code looks finished.
+
+**Rule (implemented):** The bot never auto-posts `the-pudding` repos. `get_ready_repos()` excludes the org outright (`AND r.org != 'the-pudding'`). Their repos are still recorded in the DB at discovery — they just never get tweeted in real time. They enter the biweekly digest manually, once the story is confirmed live on **pudding.cool**.
+
+**Do NOT resurrect the `homepage`-field heuristic.** Verified 2026-05-31: published stories (`kpop-generations`, `similes`, `ivf`, `happy-map`, `pockets`) all have a **null** `homepage`, while several repos that *do* set it are non-story infrastructure (`website`, `svelte-starter`, `data`). The field tracks nothing useful here.
+
+**The biweekly "is it live?" check — the RSS feed.** `https://pudding.cool/feed.xml` lists every published story with its canonical URL (e.g. `https://pudding.cool/2026/05/kpop-generations`), and the repo slug appears in the path. So a Pudding repo is live iff some feed `<link>` ends with the repo name. Secondary signal that it's *not* ready: placeholder copy in `src/data/copy.json` (`"Title TK"`, `"Description tk."`, `"TK TK"`).
+
 ## Related repo
 
 - `silva-shih/open-journalism` (public, shared) — the upstream `orgs.csv` this bot reads. PRs go upstream; never push directly to master.

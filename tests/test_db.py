@@ -181,6 +181,34 @@ def test_get_ready_repos_excludes_empty(db):
     assert len(ready) == 0
 
 
+def test_get_ready_repos_excludes_pudding(db):
+    """The Pudding repos are never auto-posted (no-scoop: they open repos
+    months before the story publishes)."""
+    _seed_org(db)
+    upsert_orgs(db, [{"org_name": "The Pudding", "github_url": "https://github.com/the-pudding"}])
+    # A non-empty, unposted, organically-discovered Pudding repo — would be
+    # "ready" by every other criterion, but must be excluded.
+    pudding_repo = {
+        "full_name": "the-pudding/secret-story",
+        "repo_name": "secret-story",
+        "repo_url": "https://github.com/the-pudding/secret-story",
+        "language": "Svelte",
+        "description": "Svelte starter boilerplate",
+    }
+    insert_repo(db, pudding_repo, org_username="the-pudding", is_empty=False)
+    # A normal repo that should still be ready, to prove the filter is org-specific.
+    other_repo = {
+        "full_name": "testorg/ready",
+        "repo_name": "ready",
+        "repo_url": "https://github.com/testorg/ready",
+        "language": "Python",
+        "description": "Ready to post",
+    }
+    insert_repo(db, other_repo, org_username="testorg", is_empty=False)
+    ready = get_ready_repos(db)
+    assert [r["full_name"] for r in ready] == ["testorg/ready"]
+
+
 def test_get_pending_empty_repos(db):
     _seed_org(db)
     repo = {

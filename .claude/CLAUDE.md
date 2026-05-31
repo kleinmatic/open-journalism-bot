@@ -116,3 +116,4 @@ Backfill scripts (gitignored one-time utilities):
 - [x] Developer alerts via Home Assistant
 - [ ] Thumbnail images in link cards (requires fetching OpenGraph images)
 - [ ] Per-org special handling rules (e.g. The Pudding: detect starter template clones, treat as empty and recheck in 24h instead of posting boilerplate description)
+- [x] **No-scoop filter for The Pudding (see root `CLAUDE.md` → "No-scoop policy").** Implemented: `get_ready_repos()` excludes `the-pudding` entirely (`AND r.org != 'the-pudding'`), so the bot never auto-posts their repo-openings. They're still recorded at discovery and enter the digest manually via the biweekly RSS check (`https://pudding.cool/feed.xml` — a repo is live iff a feed `<link>` ends with its slug). Covered by `tests/test_db.py::test_get_ready_repos_excludes_pudding`.
