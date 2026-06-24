@@ -601,7 +601,7 @@ README content:
 
     try:
         message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=256,
             messages=[
                 {"role": "user", "content": prompt + readme_content[:8000]}
@@ -643,7 +643,7 @@ README content:
 
     try:
         message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=512,
             messages=[
                 {"role": "user", "content": prompt + readme_content[:8000]}
