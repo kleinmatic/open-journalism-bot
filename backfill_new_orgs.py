@@ -59,6 +59,12 @@ def main():
         action="store_true",
         help="Show what would be inserted without writing"
     )
+    parser.add_argument(
+        "--per-page",
+        type=int,
+        default=None,
+        help="Repos to fetch per org (overrides the default 10, or 100 for whale orgs)"
+    )
     args = parser.parse_args()
 
     try:
@@ -90,7 +96,7 @@ def main():
         upsert_orgs(conn, org_data)
 
         # Fetch repos
-        per_page = 100 if username.lower() in WHALE_ORGS else 10
+        per_page = args.per_page or (100 if username.lower() in WHALE_ORGS else 10)
         try:
             repos = fetch_latest_repos(
                 github_url,
