@@ -1,10 +1,12 @@
 from datetime import datetime, timezone, timedelta
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from open_journalism_bot import (
     init_db, upsert_orgs, insert_repo, repo_exists,
     get_ready_repos, get_pending_empty_repos,
     mark_repo_posted, mark_repo_not_empty,
     recheck_empty_repo, is_repo_empty,
+    mark_repo_posted_mastodon, get_mastodon_backlog,
+    mastodon_enabled, post_to_mastodon, try_post_to_mastodon,
 )
 
 
@@ -37,6 +39,7 @@ def test_init_db_repos_schema(db):
         "committer_name", "committer_bio", "claude_summary",
         "license", "backfill_source",
         "ai_signals_json", "ai_signals_checked_at",
+        "mastodon_post_url", "mastodon_post_date",
     }
     assert columns == expected
 
@@ -507,3 +510,105 @@ def test_fetch_repo_metadata_basic(db):
     assert meta["committer_login"] == "jdoe"
     assert meta["committer_name"] == "Jane Doe"
     assert meta["committer_bio"] == "Journalist & developer"
+
+
+# --- Mastodon cross-posting ---
+
+MASTO_CONFIG = {
+    "mastodon_api_url": "https://mastodon.palewi.re",
+    "mastodon_token": "fake-token",
+}
+
+
+def _insert_posted_repo(db, full_name="testorg/proj", posted_hours_ago=1):
+    """Insert a repo already posted to BlueSky N hours ago."""
+    upsert_orgs(db, [{"org_name": "Test", "github_url": "https://github.com/testorg"}])
+    insert_repo(db, {
+        "full_name": full_name,
+        "repo_name": full_name.split("/")[1],
+        "repo_url": f"https://github.com/{full_name}",
+        "language": "Python",
+        "description": "A project",
+    }, org_username="testorg", is_empty=False)
+    db.execute(
+        """UPDATE repos SET bluesky_post_url = 'at://xxx',
+               bluesky_post_date = datetime('now', ?) WHERE full_name = ?""",
+        (f"-{posted_hours_ago} hours", full_name),
+    )
+    db.commit()
+
+
+def test_mastodon_enabled_requires_both_settings():
+    """Mastodon stays off unless both the API URL and token are set."""
+    assert mastodon_enabled(MASTO_CONFIG)
+    assert not mastodon_enabled({"mastodon_api_url": "", "mastodon_token": "t"})
+    assert not mastodon_enabled({"mastodon_api_url": "https://x", "mastodon_token": None})
+    assert not mastodon_enabled({})
+
+
+def test_mark_repo_posted_mastodon_sets_url_and_date(db):
+    """mark_repo_posted_mastodon records the status URL and a timestamp."""
+    _insert_posted_repo(db)
+    mark_repo_posted_mastodon(db, "testorg/proj", "https://mastodon.palewi.re/@bot/123")
+    row = db.execute("SELECT * FROM repos WHERE full_name = 'testorg/proj'").fetchone()
+    assert row["mastodon_post_url"] == "https://mastodon.palewi.re/@bot/123"
+    assert row["mastodon_post_date"] is not None
+    # BlueSky tracking is untouched
+    assert row["bluesky_post_url"] == "at://xxx"
+
+
+def test_post_to_mastodon_sends_expected_request():
+    """post_to_mastodon hits /api/v1/statuses with bearer auth and returns the URL."""
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"url": "https://mastodon.palewi.re/@bot/999"}
+
+    with patch("open_journalism_bot.requests.post", return_value=mock_response) as mock_post:
+        url = post_to_mastodon(MASTO_CONFIG, "Hello world", idempotency_key="testorg/proj")
+
+    assert url == "https://mastodon.palewi.re/@bot/999"
+    args, kwargs = mock_post.call_args
+    assert args[0] == "https://mastodon.palewi.re/api/v1/statuses"
+    assert kwargs["headers"]["Authorization"] == "Bearer fake-token"
+    assert kwargs["headers"]["Idempotency-Key"] == "testorg/proj"
+    assert kwargs["data"]["status"] == "Hello world"
+    assert kwargs["data"]["visibility"] == "public"
+    mock_response.raise_for_status.assert_called_once()
+
+
+def test_try_post_to_mastodon_swallows_failures(db):
+    """A Mastodon outage must not raise — BlueSky is the primary channel."""
+    _insert_posted_repo(db)
+    with patch("open_journalism_bot.post_to_mastodon", side_effect=RuntimeError("503")):
+        assert try_post_to_mastodon(db, MASTO_CONFIG, "text", "testorg/proj") is False
+    row = db.execute("SELECT * FROM repos WHERE full_name = 'testorg/proj'").fetchone()
+    assert row["mastodon_post_url"] is None
+
+
+def test_mastodon_backlog_picks_up_missed_post(db):
+    """A repo posted to BlueSky but not Mastodon shows up in the catch-up sweep."""
+    _insert_posted_repo(db, posted_hours_ago=2)
+    assert [r["full_name"] for r in get_mastodon_backlog(db)] == ["testorg/proj"]
+
+    mark_repo_posted_mastodon(db, "testorg/proj", "https://mastodon.palewi.re/@bot/1")
+    assert get_mastodon_backlog(db) == []
+
+
+def test_mastodon_backlog_ignores_old_posts(db):
+    """The sweep is time-bounded so enabling Mastodon doesn't replay the back catalog."""
+    _insert_posted_repo(db, posted_hours_ago=72)
+    assert get_mastodon_backlog(db) == []
+    assert len(get_mastodon_backlog(db, hours=96)) == 1
+
+
+def test_mastodon_backlog_ignores_unposted_repos(db):
+    """Repos never posted to BlueSky aren't Mastodon backlog — they're still 'ready'."""
+    upsert_orgs(db, [{"org_name": "Test", "github_url": "https://github.com/testorg"}])
+    insert_repo(db, {
+        "full_name": "testorg/fresh",
+        "repo_name": "fresh",
+        "repo_url": "https://github.com/testorg/fresh",
+        "language": "Go",
+        "description": "New",
+    }, org_username="testorg", is_empty=False)
+    assert get_mastodon_backlog(db) == []
+    assert len(get_ready_repos(db)) == 1

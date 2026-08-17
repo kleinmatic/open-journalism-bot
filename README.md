@@ -40,6 +40,17 @@ uv sync
 3. Name it (e.g., "open-journalism-bot")
 4. Copy the generated password
 
+**Mastodon access token** (optional — enables cross-posting):
+1. Go to `<your-server>/settings/applications` and click "New application"
+2. Name it (e.g., "open-journalism-bot")
+3. Uncheck every scope except **`write:statuses`**
+4. Submit, reopen the application, and copy "Your access token"
+
+Set `MASTODON_API_URL` to the server's **API host**, which is not always the same
+as the handle domain — `@you@palewi.re` accounts are served from
+`https://mastodon.palewi.re`. Leave `MASTODON_ACCESS_TOKEN` blank and the bot
+posts to BlueSky only.
+
 ### 3. Configure environment
 
 ```bash
@@ -123,6 +134,18 @@ Edit `templates/post.mustache` to change the post format. Available variables:
 
 Posts include an embedded link card with the repo title, description, and URL.
 
+## Mastodon Cross-Posting
+
+When `MASTODON_API_URL` and `MASTODON_ACCESS_TOKEN` are both set, every BlueSky
+post also goes out as a Mastodon status with the same text. Mastodon builds its
+own link preview by crawling the repo URL, so there's no card to construct.
+
+BlueSky remains the gate for *what* gets posted. Mastodon failures are logged and
+alerted but never interrupt the BlueSky path, and a missed post is retried on the
+next hourly run — bounded to the last 24 hours, so switching Mastodon on seeds a
+day of posts rather than replaying the whole back catalog. Posts are tracked
+separately in `repos.mastodon_post_url` / `mastodon_post_date`.
+
 ## Environment Variables
 
 | Variable | Required | Description |
@@ -131,6 +154,8 @@ Posts include an embedded link card with the repo title, description, and URL.
 | `GITHUB_TOKEN` | No | GitHub PAT for higher rate limits (recommended) |
 | `BLUESKY_HANDLE` | When posting | Your BlueSky handle |
 | `BLUESKY_APP_PASSWORD` | When posting | BlueSky app password |
+| `MASTODON_API_URL` | For Mastodon | Server API host, e.g. `https://mastodon.palewi.re` |
+| `MASTODON_ACCESS_TOKEN` | For Mastodon | Token with the `write:statuses` scope |
 | `CHECK_MINUTES` | No | Time window to check (default: 15) |
 | `TEST_MODE` | No | Set to `false` to post for real (default: true) |
 

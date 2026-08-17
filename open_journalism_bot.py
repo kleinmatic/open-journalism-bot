@@ -61,6 +61,8 @@ def init_db(db_path, _conn=None):
             first_seen            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             bluesky_post_url      TEXT,
             bluesky_post_date     TIMESTAMP,
+            mastodon_post_url     TEXT,
+            mastodon_post_date    TIMESTAMP,
             earliest_commit_date  TIMESTAMP,
             homepage_url          TEXT,
             committer_login       TEXT,
@@ -89,6 +91,8 @@ def init_db(db_path, _conn=None):
         ("backfill_source", "TEXT"),
         ("ai_signals_json", "TEXT"),
         ("ai_signals_checked_at", "TIMESTAMP"),
+        ("mastodon_post_url", "TEXT"),
+        ("mastodon_post_date", "TIMESTAMP"),
     ]
     for col_name, col_type in new_columns:
         try:
@@ -203,6 +207,36 @@ def mark_repo_posted(conn, full_name, post_url):
     conn.commit()
 
 
+def mark_repo_posted_mastodon(conn, full_name, post_url):
+    """Record that a repo has been posted to Mastodon."""
+    conn.execute(
+        """UPDATE repos SET mastodon_post_url = ?, mastodon_post_date = datetime('now')
+           WHERE full_name = ?""",
+        (post_url, full_name),
+    )
+    conn.commit()
+
+
+def get_mastodon_backlog(conn, hours=24):
+    """Get repos posted to BlueSky recently but not yet to Mastodon.
+
+    BlueSky remains the gate for *what* gets posted (see get_ready_repos), so a
+    transient Mastodon failure would otherwise drop a post permanently — the
+    repo is already marked posted and never comes up again. This sweep retries
+    it on the next hourly run, using only what's already in the database (no
+    GitHub or Claude calls). Bounded to `hours` so that turning Mastodon on for
+    the first time seeds a day of posts, not the entire back catalog.
+    """
+    return conn.execute(
+        """SELECT r.*, o.org_name FROM repos r
+           JOIN orgs o ON r.org = o.github_username
+           WHERE r.bluesky_post_url IS NOT NULL
+             AND r.mastodon_post_url IS NULL
+             AND r.bluesky_post_date > datetime('now', ?)""",
+        (f'-{int(hours)} hours',),
+    ).fetchall()
+
+
 def mark_repo_not_empty(conn, full_name, description=None, language=None, summary=None):
     """Update a previously-empty repo with new content."""
     conn.execute(
@@ -292,6 +326,12 @@ def load_config():
         'anthropic_api_key': os.getenv('ANTHROPIC_API_KEY'),
         'bluesky_handle': os.getenv('BLUESKY_HANDLE'),
         'bluesky_password': os.getenv('BLUESKY_APP_PASSWORD'),
+        # Mastodon is optional — leave the token unset and the bot posts to
+        # BlueSky only. Note this is the API host, which is not always the same
+        # as the handle domain (palewi.re handles are served from
+        # mastodon.palewi.re).
+        'mastodon_api_url': (os.getenv('MASTODON_API_URL') or '').rstrip('/'),
+        'mastodon_token': os.getenv('MASTODON_ACCESS_TOKEN'),
         'check_minutes': int(os.getenv('CHECK_MINUTES', '15')),
         'test_mode': os.getenv('TEST_MODE', 'true').lower() == 'true',
         'alert_ha_url': os.getenv('ALERT_HA_URL'),
@@ -789,6 +829,63 @@ def post_to_bluesky(client, text, repo, github_description=''):
     return response.uri
 
 
+def mastodon_enabled(config):
+    """True if both Mastodon settings are present."""
+    return bool(config.get('mastodon_api_url') and config.get('mastodon_token'))
+
+
+def verify_mastodon(config):
+    """Confirm the Mastodon token works. Returns the acct handle it posts as.
+
+    Called once at startup so a bad or revoked token fails loudly up front,
+    the way the BlueSky login does, instead of midway through the post loop.
+    """
+    response = requests.get(
+        f"{config['mastodon_api_url']}/api/v1/accounts/verify_credentials",
+        headers={'Authorization': f"Bearer {config['mastodon_token']}"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json().get('acct')
+
+
+def post_to_mastodon(config, text, idempotency_key=None):
+    """Post text to Mastodon. Returns the status URL.
+
+    No link-card equivalent to build: Mastodon crawls the URL in the post text
+    and generates its own preview from GitHub's OpenGraph tags. The idempotency
+    key (the repo's full_name) keeps a retried run from double-posting; Mastodon
+    honors it for one hour.
+    """
+    headers = {'Authorization': f"Bearer {config['mastodon_token']}"}
+    if idempotency_key:
+        headers['Idempotency-Key'] = idempotency_key
+    response = requests.post(
+        f"{config['mastodon_api_url']}/api/v1/statuses",
+        headers=headers,
+        data={'status': text, 'visibility': 'public', 'language': 'en'},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json().get('url')
+
+
+def try_post_to_mastodon(conn, config, text, full_name):
+    """Post to Mastodon and record it. Logs rather than raises on failure.
+
+    Mastodon is the secondary channel — a failure here must never interrupt
+    the BlueSky path or abort the run. Returns True if the post landed.
+    """
+    try:
+        status_url = post_to_mastodon(config, text, idempotency_key=full_name)
+        mark_repo_posted_mastodon(conn, full_name, status_url or "posted")
+        return True
+    except Exception as e:
+        logging.error(f"Mastodon post failed for {full_name}: {e}")
+        send_alert(config, f"⚠️ OJ Bot: Mastodon post failed for {full_name}")
+        return False
+
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -953,10 +1050,24 @@ def main():
 
     # Initialize BlueSky client if not in test mode
     bluesky_client = None
+    post_mastodon = mastodon_enabled(config)
     if not dry_run:
         logging.info("Logging into BlueSky...")
         bluesky_client = Client()
         bluesky_client.login(config['bluesky_handle'], config['bluesky_password'])
+
+        if post_mastodon:
+            # A bad token disables Mastodon for the run rather than killing it —
+            # BlueSky is the primary channel and shouldn't go down with it.
+            try:
+                acct = verify_mastodon(config)
+                logging.info(f"Mastodon ready: posting as @{acct} via {config['mastodon_api_url']}")
+            except Exception as e:
+                logging.error(f"Mastodon auth failed, skipping Mastodon this run: {e}")
+                send_alert(config, f"⚠️ OJ Bot: Mastodon auth failed ({e})")
+                post_mastodon = False
+        else:
+            logging.info("Mastodon not configured — posting to BlueSky only")
 
     # Phase 1: Discover new repos
     new_count = 0
@@ -1051,6 +1162,7 @@ def main():
 
     # Phase 3: Post ready repos
     posted = 0
+    mastodon_posted = 0
     ready = get_ready_repos(conn)
     for row in ready:
         repo = {
@@ -1081,19 +1193,38 @@ def main():
             logging.info(f"[Link Card] Title: {repo['repo_name']}")
             logging.info(f"[Link Card] Description: {descriptions['github_description'] or '(none)'}")
             logging.info(f"[Link Card] URL: {repo['repo_url']}")
+            target = config['mastodon_api_url'] if mastodon_enabled(config) else '(not configured)'
+            logging.info(f"[Mastodon] Would post the same text to {target}")
             logging.info("----------------------------")
         else:
             logging.info(f"Posting about {row['org_name']}/{row['repo_name']}...")
             post_uri = post_to_bluesky(bluesky_client, post_text, repo, descriptions['github_description'])
             mark_repo_posted(conn, row['full_name'], post_uri or "posted")
+            if post_mastodon and try_post_to_mastodon(conn, config, post_text, row['full_name']):
+                mastodon_posted += 1
         posted += 1
+
+    # Phase 3b: Retry any recent posts that missed Mastodon (transient failure,
+    # or Mastodon was switched on after they went out on BlueSky).
+    if post_mastodon and not dry_run:
+        for row in get_mastodon_backlog(conn):
+            repo = {
+                'repo_name': row['repo_name'],
+                'repo_url': row['repo_url'],
+                'language': row['language'] or '',
+            }
+            post_text = render_post(template, row['org_name'], repo, row['summary'])
+            logging.info(f"Mastodon catch-up for {row['full_name']}...")
+            if try_post_to_mastodon(conn, config, post_text, row['full_name']):
+                mastodon_posted += 1
 
     # Stats
     logging.info(
         f"Done. Checked {orgs_checked} orgs. "
         f"New: {new_count}, held back (empty): {empty_count}, "
         f"rechecked: {rechecked}, recovered: {recovered}, "
-        f"posted: {posted}."
+        f"posted: {posted}"
+        + (f", mastodon: {mastodon_posted}." if post_mastodon else ".")
     )
     conn.close()
 
