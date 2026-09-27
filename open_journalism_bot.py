@@ -13,6 +13,7 @@ import os
 import re
 import sqlite3
 import sys
+import unicodedata
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -23,6 +24,9 @@ from atproto import Client, models
 from dotenv import load_dotenv
 
 from ai_signals import enrich_ai_signals
+
+# BlueSky rejects a post longer than this with a 400 InvalidRequest.
+BLUESKY_MAX_GRAPHEMES = 300
 
 # Orgs with many repos that need deeper fetching to catch newly-public repos.
 # Default per_page is 10; whales get 100.
@@ -796,16 +800,65 @@ def load_template():
         return f.read()
 
 
+def grapheme_length(text):
+    """Estimate the grapheme count BlueSky will apply to `text`.
+
+    BlueSky counts user-perceived characters, and Python has no grapheme
+    iterator in the standard library. Counting code points while ignoring
+    combining marks never undercounts, so the estimate errs toward trimming a
+    little too much rather than posting one character too many.
+    """
+    return sum(1 for char in text if not unicodedata.combining(char))
+
+
 def render_post(template, org_name, repo, imputed_description=None):
-    """Render a BlueSky post using the template."""
-    data = {
-        'org_name': org_name,
-        'repo_name': repo['repo_name'],
-        'repo_url': repo['repo_url'],
-        'language': repo['language'],
-        'imputed_description': imputed_description,
-    }
-    return chevron.render(template, data).strip()
+    """Render a BlueSky post, trimming the summary if the post is too long.
+
+    BlueSky rejects a post over BLUESKY_MAX_GRAPHEMES with a 400, and only the
+    summary is safe to shorten: the org name, the URL and the link card all
+    have to survive intact. A long org name, a long repo URL and a verbose
+    Claude summary together reached 378 graphemes in September 2026, which
+    blocked the whole queue for 11 days.
+    """
+    label = repo.get('full_name') or repo['repo_name']
+
+    def render(description):
+        data = {
+            'org_name': org_name,
+            'repo_name': repo['repo_name'],
+            'repo_url': repo['repo_url'],
+            'language': repo['language'],
+            'imputed_description': description,
+        }
+        return chevron.render(template, data).strip()
+
+    text = render(imputed_description)
+    if not imputed_description or grapheme_length(text) <= BLUESKY_MAX_GRAPHEMES:
+        return text
+
+    # Give the summary whatever room the fixed parts leave, less one for the
+    # ellipsis, then shrink until it really fits.
+    budget = len(imputed_description) - (grapheme_length(text) - BLUESKY_MAX_GRAPHEMES) - 1
+    trimmed = imputed_description[:max(budget, 0)]
+    while trimmed and grapheme_length(render(trimmed + '\u2026')) > BLUESKY_MAX_GRAPHEMES:
+        trimmed = trimmed[:-1]
+    if not trimmed:
+        logging.warning(
+            f"{label}: no room for a summary in {BLUESKY_MAX_GRAPHEMES} "
+            "graphemes; posting the link alone"
+        )
+        return render(None)
+
+    logging.info(
+        f"{label}: summary trimmed from {len(imputed_description)} "
+        f"to {len(trimmed)} characters to fit BlueSky's limit"
+    )
+    # Prefer a word boundary so the ellipsis does not land mid-word. Both steps
+    # only shorten the text, so what fit before still fits.
+    cut = trimmed.rstrip()
+    if ' ' in cut:
+        cut = cut[:cut.rindex(' ')]
+    return render(cut.rstrip(' ,;:.') + '\u2026')
 
 
 def create_link_card(repo, github_description=''):
@@ -1198,7 +1251,17 @@ def main():
             logging.info("----------------------------")
         else:
             logging.info(f"Posting about {row['org_name']}/{row['repo_name']}...")
-            post_uri = post_to_bluesky(bluesky_client, post_text, repo, descriptions['github_description'])
+            try:
+                post_uri = post_to_bluesky(bluesky_client, post_text, repo, descriptions['github_description'])
+            except Exception:
+                # Never let one repo strand the queue behind it. Phase 3b and
+                # the stats line come after this loop, so an escaping exception
+                # used to cost the whole run: a single oversized post stopped
+                # every repo for 11 days in September 2026.
+                logging.exception(
+                    f"{row['full_name']}: BlueSky post failed; skipping it this run"
+                )
+                continue
             mark_repo_posted(conn, row['full_name'], post_uri or "posted")
             if post_mastodon and try_post_to_mastodon(conn, config, post_text, row['full_name']):
                 mastodon_posted += 1
