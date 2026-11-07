@@ -81,6 +81,21 @@ def init_db(db_path, _conn=None):
 
         CREATE INDEX IF NOT EXISTS idx_repos_status
             ON repos(is_empty, bluesky_post_url);
+
+        CREATE TABLE IF NOT EXISTS runs (
+            id              INTEGER PRIMARY KEY,
+            started_at      TEXT NOT NULL,
+            finished_at     TEXT,
+            status          TEXT NOT NULL,
+            orgs_checked    INTEGER,
+            new_repos       INTEGER,
+            held_back       INTEGER,
+            rechecked       INTEGER,
+            recovered       INTEGER,
+            posted_bluesky  INTEGER,
+            posted_mastodon INTEGER,
+            error           TEXT
+        );
     """)
 
     # Migration: add new columns to existing databases (no-op if already present)
@@ -106,6 +121,47 @@ def init_db(db_path, _conn=None):
 
     conn.commit()
     return conn
+
+
+RUN_COUNTERS = (
+    'orgs_checked', 'new_repos', 'held_back', 'rechecked',
+    'recovered', 'posted_bluesky', 'posted_mastodon',
+)
+
+
+def _utc_now_iso():
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def start_run(conn):
+    """Record the start of a bot run and return its row id.
+
+    A row that stays status='running' with no finished_at is a run that
+    died without reaching finish_run (OOM-kill, SIGKILL, power loss).
+    """
+    cur = conn.execute(
+        "INSERT INTO runs (started_at, status) VALUES (?, 'running')",
+        (_utc_now_iso(),),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def finish_run(conn, run_id, status, stats, error=None):
+    """Close out a run row with its counters, status ('ok' or 'error') and error text."""
+    conn.execute(
+        """UPDATE runs SET finished_at = ?, status = ?, error = ?,
+                orgs_checked = ?, new_repos = ?, held_back = ?, rechecked = ?,
+                recovered = ?, posted_bluesky = ?, posted_mastodon = ?
+           WHERE id = ?""",
+        (_utc_now_iso(), status, error, *[stats.get(k, 0) for k in RUN_COUNTERS], run_id),
+    )
+    conn.commit()
+
+
+def latest_run(conn):
+    """Most recent run row (or None); the consumer-side query, kept here for tests."""
+    return conn.execute("SELECT * FROM runs ORDER BY id DESC LIMIT 1").fetchone()
 
 
 def upsert_orgs(conn, orgs):
@@ -1055,241 +1111,251 @@ def main():
         conn = init_db(db_path)
         logging.info(f"Using database: {db_path}")
 
-    # Fetch and sync orgs
-    logging.info(f"Fetching CSV from {config['csv_url']}...")
+    # Every run leaves a row in `runs`: inserted as 'running' here and closed
+    # out below with the counters, so a crashed or hung run is visible as a
+    # row with no finished_at. Counters live in a dict so an aborted run still
+    # records how far it got.
+    run_id = start_run(conn)
+    stats = dict.fromkeys(RUN_COUNTERS, 0)
     try:
-        csv_content = fetch_csv(config['csv_url'])
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Failed to fetch CSV: {e}")
-        sys.exit(1)
-
-    all_orgs = parse_csv(csv_content)
-
-    # Handle --org filter
-    if args.org:
-        handle = args.org.lower().rstrip('/')
-        if handle.startswith('http'):
-            handle = handle.split('/')[-1]
-        matching = [o for o in all_orgs if extract_github_username(o['github_url']).lower() == handle]
-        if matching:
-            orgs = matching
-            logging.info(f"Testing single org: {orgs[0]['org_name']}")
-        else:
-            github_url = f'https://github.com/{handle}'
-            display_name = args.name if args.name else handle
-            orgs = [{'org_name': display_name, 'github_url': github_url}]
-            logging.info(f"Org '{handle}' not found in CSV, using handle as name")
-    else:
-        orgs = all_orgs
-        if args.limit > 0:
-            orgs = orgs[:args.limit]
-            logging.info(f"Limited to first {args.limit} organizations")
-
-    # In dry-run mode the DB is in-memory, so writes are side-effect-free
-    new_orgs = upsert_orgs(conn, orgs)
-    if new_orgs:
-        logging.info(f"New orgs added: {', '.join(sorted(new_orgs))} — their existing repos will be seeded, not posted")
-
-    logging.info(f"Checking {len(orgs)} organizations for new repos...")
-
-    if not config['github_token']:
-        logging.warning("No GITHUB_TOKEN set. Rate limited to 60 requests/hour.")
-    if not config['anthropic_api_key']:
-        logging.warning("No ANTHROPIC_API_KEY set. AI-generated descriptions disabled.")
-    else:
-        logging.info("Anthropic API key configured for README summarization.")
-
-    template = load_template()
-
-    # Initialize BlueSky client if not in test mode
-    bluesky_client = None
-    post_mastodon = mastodon_enabled(config)
-    if not dry_run:
-        logging.info("Logging into BlueSky...")
-        bluesky_client = Client()
-        bluesky_client.login(config['bluesky_handle'], config['bluesky_password'])
-
-        if post_mastodon:
-            # A bad token disables Mastodon for the run rather than killing it —
-            # BlueSky is the primary channel and shouldn't go down with it.
-            try:
-                acct = verify_mastodon(config)
-                logging.info(f"Mastodon ready: posting as @{acct} via {config['mastodon_api_url']}")
-            except Exception as e:
-                logging.error(f"Mastodon auth failed, skipping Mastodon this run: {e}")
-                send_alert(config, f"⚠️ OJ Bot: Mastodon auth failed ({e})")
-                post_mastodon = False
-        else:
-            logging.info("Mastodon not configured — posting to BlueSky only")
-
-    # Phase 1: Discover new repos
-    new_count = 0
-    empty_count = 0
-    orgs_checked = 0
-
-    for org in orgs:
-        username = extract_github_username(org['github_url'])
-        per_page = 100 if username.lower() in WHALE_ORGS else 10
+        # Fetch and sync orgs
+        logging.info(f"Fetching CSV from {config['csv_url']}...")
         try:
-            repos = fetch_latest_repos(
-                org['github_url'],
-                token=config['github_token'],
-                per_page=per_page,
-            )
-            orgs_checked += 1
-        except RateLimitError as e:
-            logging.error(f"Rate limit hit after {orgs_checked} orgs: {e}")
-            send_alert(config, f"⚠️ OJ Bot: Rate limit hit after {orgs_checked} orgs")
-            break
+            csv_content = fetch_csv(config['csv_url'])
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Failed to fetch CSV: {e}")
+            sys.exit(f"Failed to fetch CSV: {e}")
 
-        is_new_org = username in new_orgs
+        all_orgs = parse_csv(csv_content)
 
-        for repo in repos:
-            if repo_exists(conn, repo['full_name']):
-                continue
-
-            # Seed existing repos for newly-added orgs — mark them as
-            # backfilled so they won't be posted to BlueSky.  Only repos
-            # discovered on *future* runs (after the seed) get posted.
-            if is_new_org:
-                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                metadata = fetch_repo_metadata(repo['full_name'], token=config['github_token'])
-                insert_repo(conn, repo, org_username=username, is_empty=False, metadata=metadata)
-                conn.execute(
-                    "UPDATE repos SET backfill_source = ? WHERE full_name = ?",
-                    (f"org-seed {today}", repo['full_name']),
-                )
-                conn.commit()
-                logging.info(f"{repo['full_name']}: seeded (new org, not posting)")
-                continue
-
-            # Detect likely private-to-public repos
-            created_at = datetime.fromisoformat(repo['created_at'].replace('Z', '+00:00'))
-            age_hours = (datetime.now(timezone.utc) - created_at).total_seconds() / 3600
-            if age_hours > 24:
-                logging.warning(
-                    f"{repo['full_name']}: created {created_at.strftime('%Y-%m-%d')} but not previously seen — likely made public recently"
-                )
-                send_alert(config, f"📦 OJ Bot: {repo['full_name']} created {created_at.strftime('%Y-%m-%d')} but just appeared — likely made public recently")
-
-            empty = is_repo_empty(repo)
-            metadata = fetch_repo_metadata(repo['full_name'], token=config['github_token'])
-            insert_repo(conn, repo, org_username=username, is_empty=empty, metadata=metadata)
-
-            if empty:
-                empty_count += 1
-                logging.info(f"{repo['full_name']}: empty, holding back for recheck")
+        # Handle --org filter
+        if args.org:
+            handle = args.org.lower().rstrip('/')
+            if handle.startswith('http'):
+                handle = handle.split('/')[-1]
+            matching = [o for o in all_orgs if extract_github_username(o['github_url']).lower() == handle]
+            if matching:
+                orgs = matching
+                logging.info(f"Testing single org: {orgs[0]['org_name']}")
             else:
-                new_count += 1
-                logging.info(f"{repo['full_name']}: new repo with content")
-
-            if not empty and config.get('anthropic_api_key'):
-                readme_content = fetch_readme(repo['full_name'], token=config['github_token'])
-                if readme_content:
-                    claude_summary = generate_claude_summary(readme_content, config['anthropic_api_key'])
-                    if claude_summary:
-                        conn.execute(
-                            "UPDATE repos SET claude_summary = ? WHERE full_name = ?",
-                            (claude_summary, repo['full_name']),
-                        )
-                        conn.commit()
-                        logging.info(f"{repo['full_name']}: generated claude_summary")
-
-            if not empty:
-                scan_and_store_ai_signals(conn, repo['full_name'], token=config['github_token'])
-
-    # Phase 2: Recheck pending empty repos
-    rechecked = 0
-    recovered = 0
-    pending = get_pending_empty_repos(conn)
-    for row in pending:
-        if dry_run:
-            logging.info(f"{row['full_name']}: would recheck (pending empty repo)")
-            rechecked += 1
-            continue
-        changed = recheck_empty_repo(conn, row['full_name'], token=config['github_token'])
-        rechecked += 1
-        if changed:
-            recovered += 1
-            scan_and_store_ai_signals(conn, row['full_name'], token=config['github_token'])
-
-    # Phase 3: Post ready repos
-    posted = 0
-    mastodon_posted = 0
-    ready = get_ready_repos(conn)
-    for row in ready:
-        repo = {
-            'full_name': row['full_name'],
-            'repo_name': row['repo_name'],
-            'repo_url': row['repo_url'],
-            'language': row['language'] or '',
-            'description': row['description'] or '',
-        }
-        descriptions = get_repo_descriptions(
-            repo,
-            token=config['github_token'],
-            anthropic_api_key=config['anthropic_api_key'],
-        )
-        # Store summary if we got one
-        if descriptions['imputed_description']:
-            conn.execute(
-                "UPDATE repos SET summary = ? WHERE full_name = ?",
-                (descriptions['imputed_description'], row['full_name']),
-            )
-            conn.commit()
-
-        post_text = render_post(template, row['org_name'], repo, descriptions['imputed_description'])
-
-        if dry_run:
-            logging.info("--- DRY RUN: Would post ---")
-            logging.info(post_text)
-            logging.info(f"[Link Card] Title: {repo['repo_name']}")
-            logging.info(f"[Link Card] Description: {descriptions['github_description'] or '(none)'}")
-            logging.info(f"[Link Card] URL: {repo['repo_url']}")
-            target = config['mastodon_api_url'] if mastodon_enabled(config) else '(not configured)'
-            logging.info(f"[Mastodon] Would post the same text to {target}")
-            logging.info("----------------------------")
+                github_url = f'https://github.com/{handle}'
+                display_name = args.name if args.name else handle
+                orgs = [{'org_name': display_name, 'github_url': github_url}]
+                logging.info(f"Org '{handle}' not found in CSV, using handle as name")
         else:
-            logging.info(f"Posting about {row['org_name']}/{row['repo_name']}...")
-            try:
-                post_uri = post_to_bluesky(bluesky_client, post_text, repo, descriptions['github_description'])
-            except Exception:
-                # Never let one repo strand the queue behind it. Phase 3b and
-                # the stats line come after this loop, so an escaping exception
-                # used to cost the whole run: a single oversized post stopped
-                # every repo for 11 days in September 2026.
-                logging.exception(
-                    f"{row['full_name']}: BlueSky post failed; skipping it this run"
-                )
-                continue
-            mark_repo_posted(conn, row['full_name'], post_uri or "posted")
-            if post_mastodon and try_post_to_mastodon(conn, config, post_text, row['full_name']):
-                mastodon_posted += 1
-        posted += 1
+            orgs = all_orgs
+            if args.limit > 0:
+                orgs = orgs[:args.limit]
+                logging.info(f"Limited to first {args.limit} organizations")
 
-    # Phase 3b: Retry any recent posts that missed Mastodon (transient failure,
-    # or Mastodon was switched on after they went out on BlueSky).
-    if post_mastodon and not dry_run:
-        for row in get_mastodon_backlog(conn):
+        # In dry-run mode the DB is in-memory, so writes are side-effect-free
+        new_orgs = upsert_orgs(conn, orgs)
+        if new_orgs:
+            logging.info(f"New orgs added: {', '.join(sorted(new_orgs))} — their existing repos will be seeded, not posted")
+
+        logging.info(f"Checking {len(orgs)} organizations for new repos...")
+
+        if not config['github_token']:
+            logging.warning("No GITHUB_TOKEN set. Rate limited to 60 requests/hour.")
+        if not config['anthropic_api_key']:
+            logging.warning("No ANTHROPIC_API_KEY set. AI-generated descriptions disabled.")
+        else:
+            logging.info("Anthropic API key configured for README summarization.")
+
+        template = load_template()
+
+        # Initialize BlueSky client if not in test mode
+        bluesky_client = None
+        post_mastodon = mastodon_enabled(config)
+        if not dry_run:
+            logging.info("Logging into BlueSky...")
+            bluesky_client = Client()
+            bluesky_client.login(config['bluesky_handle'], config['bluesky_password'])
+
+            if post_mastodon:
+                # A bad token disables Mastodon for the run rather than killing it —
+                # BlueSky is the primary channel and shouldn't go down with it.
+                try:
+                    acct = verify_mastodon(config)
+                    logging.info(f"Mastodon ready: posting as @{acct} via {config['mastodon_api_url']}")
+                except Exception as e:
+                    logging.error(f"Mastodon auth failed, skipping Mastodon this run: {e}")
+                    send_alert(config, f"⚠️ OJ Bot: Mastodon auth failed ({e})")
+                    post_mastodon = False
+            else:
+                logging.info("Mastodon not configured — posting to BlueSky only")
+
+        # Phase 1: Discover new repos
+
+        for org in orgs:
+            username = extract_github_username(org['github_url'])
+            per_page = 100 if username.lower() in WHALE_ORGS else 10
+            try:
+                repos = fetch_latest_repos(
+                    org['github_url'],
+                    token=config['github_token'],
+                    per_page=per_page,
+                )
+                stats['orgs_checked'] += 1
+            except RateLimitError as e:
+                logging.error(f"Rate limit hit after {stats['orgs_checked']} orgs: {e}")
+                send_alert(config, f"⚠️ OJ Bot: Rate limit hit after {stats['orgs_checked']} orgs")
+                break
+
+            is_new_org = username in new_orgs
+
+            for repo in repos:
+                if repo_exists(conn, repo['full_name']):
+                    continue
+
+                # Seed existing repos for newly-added orgs — mark them as
+                # backfilled so they won't be posted to BlueSky.  Only repos
+                # discovered on *future* runs (after the seed) get posted.
+                if is_new_org:
+                    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    metadata = fetch_repo_metadata(repo['full_name'], token=config['github_token'])
+                    insert_repo(conn, repo, org_username=username, is_empty=False, metadata=metadata)
+                    conn.execute(
+                        "UPDATE repos SET backfill_source = ? WHERE full_name = ?",
+                        (f"org-seed {today}", repo['full_name']),
+                    )
+                    conn.commit()
+                    logging.info(f"{repo['full_name']}: seeded (new org, not posting)")
+                    continue
+
+                # Detect likely private-to-public repos
+                created_at = datetime.fromisoformat(repo['created_at'].replace('Z', '+00:00'))
+                age_hours = (datetime.now(timezone.utc) - created_at).total_seconds() / 3600
+                if age_hours > 24:
+                    logging.warning(
+                        f"{repo['full_name']}: created {created_at.strftime('%Y-%m-%d')} but not previously seen — likely made public recently"
+                    )
+                    send_alert(config, f"📦 OJ Bot: {repo['full_name']} created {created_at.strftime('%Y-%m-%d')} but just appeared — likely made public recently")
+
+                empty = is_repo_empty(repo)
+                metadata = fetch_repo_metadata(repo['full_name'], token=config['github_token'])
+                insert_repo(conn, repo, org_username=username, is_empty=empty, metadata=metadata)
+
+                if empty:
+                    stats['held_back'] += 1
+                    logging.info(f"{repo['full_name']}: empty, holding back for recheck")
+                else:
+                    stats['new_repos'] += 1
+                    logging.info(f"{repo['full_name']}: new repo with content")
+
+                if not empty and config.get('anthropic_api_key'):
+                    readme_content = fetch_readme(repo['full_name'], token=config['github_token'])
+                    if readme_content:
+                        claude_summary = generate_claude_summary(readme_content, config['anthropic_api_key'])
+                        if claude_summary:
+                            conn.execute(
+                                "UPDATE repos SET claude_summary = ? WHERE full_name = ?",
+                                (claude_summary, repo['full_name']),
+                            )
+                            conn.commit()
+                            logging.info(f"{repo['full_name']}: generated claude_summary")
+
+                if not empty:
+                    scan_and_store_ai_signals(conn, repo['full_name'], token=config['github_token'])
+
+        # Phase 2: Recheck pending empty repos
+        pending = get_pending_empty_repos(conn)
+        for row in pending:
+            if dry_run:
+                logging.info(f"{row['full_name']}: would recheck (pending empty repo)")
+                stats['rechecked'] += 1
+                continue
+            changed = recheck_empty_repo(conn, row['full_name'], token=config['github_token'])
+            stats['rechecked'] += 1
+            if changed:
+                stats['recovered'] += 1
+                scan_and_store_ai_signals(conn, row['full_name'], token=config['github_token'])
+
+        # Phase 3: Post ready repos
+        ready = get_ready_repos(conn)
+        for row in ready:
             repo = {
+                'full_name': row['full_name'],
                 'repo_name': row['repo_name'],
                 'repo_url': row['repo_url'],
                 'language': row['language'] or '',
+                'description': row['description'] or '',
             }
-            post_text = render_post(template, row['org_name'], repo, row['summary'])
-            logging.info(f"Mastodon catch-up for {row['full_name']}...")
-            if try_post_to_mastodon(conn, config, post_text, row['full_name']):
-                mastodon_posted += 1
+            descriptions = get_repo_descriptions(
+                repo,
+                token=config['github_token'],
+                anthropic_api_key=config['anthropic_api_key'],
+            )
+            # Store summary if we got one
+            if descriptions['imputed_description']:
+                conn.execute(
+                    "UPDATE repos SET summary = ? WHERE full_name = ?",
+                    (descriptions['imputed_description'], row['full_name']),
+                )
+                conn.commit()
 
-    # Stats
-    logging.info(
-        f"Done. Checked {orgs_checked} orgs. "
-        f"New: {new_count}, held back (empty): {empty_count}, "
-        f"rechecked: {rechecked}, recovered: {recovered}, "
-        f"posted: {posted}"
-        + (f", mastodon: {mastodon_posted}." if post_mastodon else ".")
-    )
-    conn.close()
+            post_text = render_post(template, row['org_name'], repo, descriptions['imputed_description'])
+
+            if dry_run:
+                logging.info("--- DRY RUN: Would post ---")
+                logging.info(post_text)
+                logging.info(f"[Link Card] Title: {repo['repo_name']}")
+                logging.info(f"[Link Card] Description: {descriptions['github_description'] or '(none)'}")
+                logging.info(f"[Link Card] URL: {repo['repo_url']}")
+                target = config['mastodon_api_url'] if mastodon_enabled(config) else '(not configured)'
+                logging.info(f"[Mastodon] Would post the same text to {target}")
+                logging.info("----------------------------")
+            else:
+                logging.info(f"Posting about {row['org_name']}/{row['repo_name']}...")
+                try:
+                    post_uri = post_to_bluesky(bluesky_client, post_text, repo, descriptions['github_description'])
+                except Exception:
+                    # Never let one repo strand the queue behind it. Phase 3b and
+                    # the stats line come after this loop, so an escaping exception
+                    # used to cost the whole run: a single oversized post stopped
+                    # every repo for 11 days in September 2026.
+                    logging.exception(
+                        f"{row['full_name']}: BlueSky post failed; skipping it this run"
+                    )
+                    continue
+                mark_repo_posted(conn, row['full_name'], post_uri or "posted")
+                if post_mastodon and try_post_to_mastodon(conn, config, post_text, row['full_name']):
+                    stats['posted_mastodon'] += 1
+            stats['posted_bluesky'] += 1
+
+        # Phase 3b: Retry any recent posts that missed Mastodon (transient failure,
+        # or Mastodon was switched on after they went out on BlueSky).
+        if post_mastodon and not dry_run:
+            for row in get_mastodon_backlog(conn):
+                repo = {
+                    'repo_name': row['repo_name'],
+                    'repo_url': row['repo_url'],
+                    'language': row['language'] or '',
+                }
+                post_text = render_post(template, row['org_name'], repo, row['summary'])
+                logging.info(f"Mastodon catch-up for {row['full_name']}...")
+                if try_post_to_mastodon(conn, config, post_text, row['full_name']):
+                    stats['posted_mastodon'] += 1
+
+
+        # Stats
+        logging.info(
+            f"Done. Checked {stats['orgs_checked']} orgs. "
+            f"New: {stats['new_repos']}, held back (empty): {stats['held_back']}, "
+            f"rechecked: {stats['rechecked']}, recovered: {stats['recovered']}, "
+            f"posted: {stats['posted_bluesky']}"
+            + (f", mastodon: {stats['posted_mastodon']}." if post_mastodon else ".")
+        )
+    except BaseException as e:
+        # SystemExit and KeyboardInterrupt included: anything that ends the run
+        # early is an error from the monitor's point of view.
+        detail = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        finish_run(conn, run_id, 'error', stats, error=detail)
+        conn.close()
+        raise
+    else:
+        finish_run(conn, run_id, 'ok', stats)
+        conn.close()
 
 
 if __name__ == '__main__':

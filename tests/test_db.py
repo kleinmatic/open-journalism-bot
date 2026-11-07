@@ -612,3 +612,66 @@ def test_mastodon_backlog_ignores_unposted_repos(db):
     }, org_username="testorg", is_empty=False)
     assert get_mastodon_backlog(db) == []
     assert len(get_ready_repos(db)) == 1
+
+
+# --- runs table -----------------------------------------------------------
+
+def test_init_db_creates_runs_table(db):
+    cols = [r[1] for r in db.execute("PRAGMA table_info(runs)").fetchall()]
+    assert cols == [
+        'id', 'started_at', 'finished_at', 'status', 'orgs_checked', 'new_repos',
+        'held_back', 'rechecked', 'recovered', 'posted_bluesky', 'posted_mastodon', 'error',
+    ]
+
+
+def test_start_run_inserts_running_row(db):
+    from open_journalism_bot import start_run, latest_run
+    run_id = start_run(db)
+    row = latest_run(db)
+    assert row['id'] == run_id
+    assert row['status'] == 'running'
+    assert row['finished_at'] is None
+    assert row['started_at'].endswith('Z') and 'T' in row['started_at']
+    assert row['orgs_checked'] is None  # counters unknown until the run ends
+
+
+def test_finish_run_ok_records_counters(db):
+    from open_journalism_bot import start_run, finish_run, latest_run, RUN_COUNTERS
+    run_id = start_run(db)
+    stats = {k: i for i, k in enumerate(RUN_COUNTERS, start=1)}
+    finish_run(db, run_id, 'ok', stats)
+    row = latest_run(db)
+    assert row['status'] == 'ok'
+    assert row['finished_at'] is not None and row['error'] is None
+    assert [row[k] for k in RUN_COUNTERS] == [1, 2, 3, 4, 5, 6, 7]
+
+
+def test_finish_run_error_keeps_partial_counters(db):
+    from open_journalism_bot import start_run, finish_run, latest_run
+    run_id = start_run(db)
+    finish_run(db, run_id, 'error', {'orgs_checked': 12}, error='RateLimitError: boom')
+    row = latest_run(db)
+    assert row['status'] == 'error'
+    assert row['error'] == 'RateLimitError: boom'
+    assert row['orgs_checked'] == 12
+    assert row['new_repos'] == 0  # missing counters default to 0, not NULL
+
+
+def test_latest_run_returns_newest(db):
+    from open_journalism_bot import start_run, finish_run, latest_run
+    first = start_run(db)
+    finish_run(db, first, 'ok', {})
+    second = start_run(db)
+    assert latest_run(db)['id'] == second
+    assert latest_run(db)['status'] == 'running'
+
+
+def test_runs_table_added_to_existing_db():
+    """A pre-runs database gets the table on the next init_db (deploy path)."""
+    import sqlite3
+    from open_journalism_bot import init_db
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE orgs (github_username TEXT PRIMARY KEY, org_name TEXT NOT NULL, github_url TEXT NOT NULL)")
+    conn.commit()
+    conn = init_db(":memory:", _conn=conn)
+    assert conn.execute("SELECT count(*) FROM runs").fetchone()[0] == 0
