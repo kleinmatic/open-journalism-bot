@@ -39,7 +39,7 @@ def test_init_db_repos_schema(db):
         "committer_name", "committer_bio", "claude_summary",
         "license", "backfill_source",
         "ai_signals_json", "ai_signals_checked_at",
-        "mastodon_post_url", "mastodon_post_date",
+        "mastodon_post_url", "mastodon_post_date", "last_recheck_at",
     }
     assert columns == expected
 
@@ -227,22 +227,62 @@ def test_get_pending_empty_repos(db):
     assert pending[0]["full_name"] == "testorg/pending"
 
 
-def test_get_pending_empty_repos_excludes_old(db):
-    """Repos first_seen > 24h ago should not appear as pending."""
-    _seed_org(db)
+def _seed_empty(db, name, first_seen_ago, last_recheck_ago=None):
     repo = {
-        "full_name": "testorg/old-empty",
-        "repo_name": "old-empty",
-        "repo_url": "https://github.com/testorg/old-empty",
+        "full_name": f"testorg/{name}",
+        "repo_name": name,
+        "repo_url": f"https://github.com/testorg/{name}",
         "language": "",
         "description": "",
     }
     insert_repo(db, repo, org_username="testorg", is_empty=True)
-    old_time = (datetime.now(timezone.utc) - timedelta(hours=25)).strftime("%Y-%m-%d %H:%M:%S")
-    db.execute("UPDATE repos SET first_seen=? WHERE full_name='testorg/old-empty'", (old_time,))
+    fmt = "%Y-%m-%d %H:%M:%S"
+    now = datetime.now(timezone.utc)
+    last = (now - last_recheck_ago).strftime(fmt) if last_recheck_ago else None
+    db.execute(
+        "UPDATE repos SET first_seen=?, last_recheck_at=? WHERE full_name=?",
+        ((now - first_seen_ago).strftime(fmt), last, f"testorg/{name}"),
+    )
     db.commit()
-    pending = get_pending_empty_repos(db)
-    assert len(pending) == 0
+
+
+def test_get_pending_empty_repos_first_day_is_hourly(db):
+    """Inside the first 24h a repo is due on every run, even if just rechecked."""
+    _seed_org(db)
+    _seed_empty(db, "fresh", timedelta(hours=23), last_recheck_ago=timedelta(minutes=5))
+    assert [r["full_name"] for r in get_pending_empty_repos(db)] == ["testorg/fresh"]
+
+
+def test_get_pending_empty_repos_after_first_day_is_daily(db):
+    """After 24h a repo is due only when its last recheck is more than a day old."""
+    _seed_org(db)
+    _seed_empty(db, "checked-today", timedelta(days=5), last_recheck_ago=timedelta(hours=3))
+    _seed_empty(db, "checked-yesterday", timedelta(days=5), last_recheck_ago=timedelta(hours=25))
+    _seed_empty(db, "never-stamped", timedelta(days=5))  # pre-migration row: NULL counts as due
+    names = sorted(r["full_name"] for r in get_pending_empty_repos(db))
+    assert names == ["testorg/checked-yesterday", "testorg/never-stamped"]
+
+
+def test_get_pending_empty_repos_excludes_old(db):
+    """Repos first_seen more than 30 days ago are given up on."""
+    _seed_org(db)
+    _seed_empty(db, "old-empty", timedelta(days=31))
+    assert len(get_pending_empty_repos(db)) == 0
+
+
+def test_recheck_stamps_last_recheck_at(db):
+    """Every recheck records when it ran, whatever the outcome."""
+    _seed_org(db)
+    _seed_empty(db, "stamped", timedelta(days=2))
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"description": None, "language": None}
+    with patch("open_journalism_bot.requests.get", return_value=mock_response), \
+         patch("open_journalism_bot.fetch_readme", return_value=None):
+        recheck_empty_repo(db, "testorg/stamped", token=None)
+    row = db.execute("SELECT last_recheck_at FROM repos WHERE full_name='testorg/stamped'").fetchone()
+    assert row["last_recheck_at"] is not None
+    assert len(get_pending_empty_repos(db)) == 0  # just checked, not due again today
 
 
 def test_mark_repo_posted(db):

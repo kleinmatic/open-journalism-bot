@@ -76,7 +76,8 @@ def init_db(db_path, _conn=None):
             license               TEXT,
             backfill_source       TEXT,
             ai_signals_json       TEXT,
-            ai_signals_checked_at TIMESTAMP
+            ai_signals_checked_at TIMESTAMP,
+            last_recheck_at       TIMESTAMP
         );
 
         CREATE INDEX IF NOT EXISTS idx_repos_status
@@ -112,6 +113,7 @@ def init_db(db_path, _conn=None):
         ("ai_signals_checked_at", "TIMESTAMP"),
         ("mastodon_post_url", "TEXT"),
         ("mastodon_post_date", "TIMESTAMP"),
+        ("last_recheck_at", "TIMESTAMP"),
     ]
     for col_name, col_type in new_columns:
         try:
@@ -246,14 +248,31 @@ def get_ready_repos(conn):
     ).fetchall()
 
 
+RECHECK_HOURLY_HOURS = 24   # recheck every run for the first day
+RECHECK_WINDOW_DAYS = 30    # then once a day until the repo is this old
+
+
 def get_pending_empty_repos(conn):
-    """Get empty repos still within the 24h recheck window."""
+    """Get empty repos due for a recheck.
+
+    A repo seen empty is rechecked on every hourly run for its first day, then
+    once a day until it is 30 days old. Newsrooms often create a repo as an
+    empty shell and push the code days or weeks later: propublica/re-source
+    was created 2026-10-28, got its first commit on 11-02 and its launch post
+    on 11-03, all after the old 24-hour window had closed, so the bot never
+    announced it. `last_recheck_at` is stamped by recheck_empty_repo; a NULL
+    (rows from before the column existed) counts as due.
+    """
     return conn.execute(
         """SELECT r.*, o.org_name FROM repos r
            JOIN orgs o ON r.org = o.github_username
            WHERE r.is_empty = 1
              AND r.bluesky_post_url IS NULL
-             AND r.first_seen > datetime('now', '-24 hours')"""
+             AND r.first_seen > datetime('now', ?)
+             AND (r.first_seen > datetime('now', ?)
+                  OR r.last_recheck_at IS NULL
+                  OR r.last_recheck_at < datetime('now', '-24 hours'))""",
+        (f'-{RECHECK_WINDOW_DAYS} days', f'-{RECHECK_HOURLY_HOURS} hours'),
     ).fetchall()
 
 
@@ -314,6 +333,11 @@ def recheck_empty_repo(conn, full_name, token=None):
     """
     headers = get_github_headers(token)
     url = f"https://api.github.com/repos/{full_name}"
+    conn.execute(
+        "UPDATE repos SET last_recheck_at = datetime('now') WHERE full_name = ?",
+        (full_name,),
+    )
+    conn.commit()
 
     try:
         response = requests.get(url, headers=headers, timeout=30)
